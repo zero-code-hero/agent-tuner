@@ -154,13 +154,17 @@ function cleanResponse(text: string): string {
   let cleaned = text.trim();
   // Strip markdown code fences — handle multiple fenced blocks by taking
   // the last one (LLMs often put the final answer in the last fence).
+  // Use a regex that matches balanced ``` pairs instead of naive splitting,
+  // which breaks on odd numbers of fence markers (e.g. nested code examples).
   if (cleaned.includes("```")) {
-    const blocks = cleaned.split(/```+/);
-    // blocks[0] is before first fence, blocks[1] is inside first fence, etc.
-    // Odd indices are inside fences, even indices are outside.
-    const fencedBlocks = blocks.filter((_, i) => i % 2 === 1);
-    if (fencedBlocks.length > 0) {
-      cleaned = fencedBlocks[fencedBlocks.length - 1];
+    const fenceRegex = /```(?:\w*)\n?([\s\S]*?)```/g;
+    let lastMatch: string | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = fenceRegex.exec(cleaned)) !== null) {
+      lastMatch = m[1];
+    }
+    if (lastMatch !== null) {
+      cleaned = lastMatch;
     }
     // Remove leading language tag like "json\n"
     cleaned = cleaned.replace(/^(json|txt|text|md)\n/, "");

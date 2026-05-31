@@ -32,6 +32,14 @@ Iteration N (depth N):
 | 3 | code style, architecture, env vars, README |
 | 4 | anti-patterns, pitfalls, branching strategy, dependencies |
 
+## Dependencies
+
+- **Node.js >= 18**
+- **Pi Coding Agent** (`@earendil-works/pi-coding-agent`) — required for the default agent runner. Provides the `read`, `bash`, `grep`, `find`, `ls` tool suite used by the generator and test agents.
+- **Claude Code CLI** (`claude`) — optional fallback backend. Use `--backend claude` if Pi is not available.
+
+If neither backend is available the tool cannot run. The Pi SDK is the recommended and default backend.
+
 ## Install
 
 ```bash
