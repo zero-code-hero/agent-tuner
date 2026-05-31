@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.md.generated
+.env
+.env.local
+.env.*
+.agent-tuner-state.json
+.DS_Store
+*.log
+coverage/
