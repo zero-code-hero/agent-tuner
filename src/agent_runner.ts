@@ -1,5 +1,9 @@
 import { spawn } from "child_process";
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, getModel } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, ModelRegistry, AuthStorage } from "@earendil-works/pi-coding-agent";
+
+// ThinkingLevel is internal to pi-agent-core and not re-exported.
+// Mirror the SDK's union so we can type thinkingLevel without `as any`.
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
 export type RunnerBackend = "pi" | "claude";
 
@@ -12,7 +16,7 @@ export interface RunnerResult {
 export interface RunnerOptions {
   cwd: string;
   model?: string; // provider/model
-  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
+  thinkingLevel?: ThinkingLevel;
   noContextFiles?: boolean;
   customContext?: string;
   maxTurns?: number;
@@ -23,7 +27,7 @@ export interface RunnerOptions {
 export class AgentRunner {
   private cwd: string;
   private model: string;
-  private thinkingLevel: string;
+  private thinkingLevel: ThinkingLevel;
   private noContextFiles: boolean;
   private customContext?: string;
   private maxTurns: number;
@@ -33,7 +37,7 @@ export class AgentRunner {
   constructor(opts: RunnerOptions) {
     this.cwd = opts.cwd;
     this.model = opts.model || "anthropic/claude-sonnet-4-20250514";
-    this.thinkingLevel = opts.thinkingLevel || "off";
+    this.thinkingLevel = (opts.thinkingLevel || "off") as ThinkingLevel;
     this.noContextFiles = opts.noContextFiles || false;
     this.customContext = opts.customContext;
     this.maxTurns = opts.maxTurns || 25;
@@ -51,12 +55,17 @@ export class AgentRunner {
   // ─── Pi SDK backend ───
 
   private async runViaPi(prompt: string): Promise<RunnerResult> {
+    // Resolve the model through the typed ModelRegistry — no internal API hacks
+    const authStorage = AuthStorage.inMemory();
+    const modelRegistry = ModelRegistry.inMemory(authStorage);
     const [provider, modelId] = this.model.split("/");
-    const model = getModel(provider, modelId);
+    const model = modelRegistry.find(provider, modelId);
     if (!model) {
       return { text: "", toolCalls: [], error: `Model not found: ${this.model}` };
     }
 
+    // Build loader options using the public constructor — no `as any` hacks.
+    // DefaultResourceLoader accepts noContextFiles and agentsFilesOverride natively.
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
@@ -64,61 +73,30 @@ export class AgentRunner {
         compaction: { enabled: false },
         retry: { enabled: true, maxRetries: 2 },
       }),
-    });
-
-    // ─── Context file override ───
-    // agentsFilesOverride is an internal pi SDK hook. If it's missing or fails
-    // and noContextFiles is set, the fresh-agent test is invalid — fail loud.
-    const loaderAny = loader as any;
-    const hasOverride = typeof loaderAny.agentsFilesOverride !== "undefined";
-
-    if (this.noContextFiles) {
-      if (!hasOverride) {
-        return {
-          text: "",
-          toolCalls: [],
-          error:
-            "Cannot run fresh-agent test: Pi SDK does not expose agentsFilesOverride. " +
-            "The test requires stripping AGENTS.md/CLAUDE.md but the SDK version doesn't support it.",
-        };
-      }
-      try {
-        loaderAny.agentsFilesOverride = () => ({ agentsFiles: [] });
-      } catch (e: any) {
-        return {
-          text: "",
-          toolCalls: [],
-          error: `Failed to strip context files for fresh-agent test: ${e.message}`,
-        };
-      }
-    } else if (this.customContext && hasOverride) {
-      try {
-        const orig = loaderAny.agentsFilesOverride;
-        loaderAny.agentsFilesOverride = (current: any) => ({
+      noContextFiles: this.noContextFiles,
+      ...(this.customContext ? {
+        agentsFilesOverride: (base: any) => ({
           agentsFiles: [
-            ...(orig ? orig(current).agentsFiles : current.agentsFiles),
+            ...base.agentsFiles,
             { path: "/virtual/context.md", content: this.customContext },
           ],
-        });
-      } catch (e: any) {
-        if (process.env.DEBUG) console.warn(`⚠️  Failed to inject custom context: ${e.message}`);
-      }
-    } else if (this.customContext && !hasOverride) {
-      if (process.env.DEBUG) console.warn("⚠️  Custom context requested but agentsFilesOverride not available — skipping injection");
-    }
-
+        }),
+      } : {}),
+    });
     await loader.reload();
 
     const { session } = await createAgentSession({
       cwd: this.cwd,
       model,
-      thinkingLevel: this.thinkingLevel as any,
+      thinkingLevel: this.thinkingLevel,
       tools: ["read", "bash", "grep", "find", "ls"],
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(),
     });
 
-    // Pending tool call queue — keyed by sequence ID to avoid race conditions
+    // Pending tool call queue — keyed by sequence ID for 1:1 correlation
+    // between execution_start and execution_end events. Avoids fragile
+    // JSON.stringify arg matching that breaks on unordered keys or functions.
     const pendingCalls = new Map<number, { name: string; args: any; resolved: boolean }>();
     let nextSeq = 0;
     const toolCalls: Array<{ name: string; args: any; result?: string }> = [];
@@ -131,11 +109,13 @@ export class AgentRunner {
         toolCalls.push({ name: event.toolName, args: event.args });
       }
       if (event.type === "tool_execution_end") {
-        // Match by finding the first unresolved pending call with matching name+args
+        // Match by sequence: pop the oldest unresolved pending call.
+        // The SDK emits start/end in strict order per tool invocation,
+        // so FIFO correlation is safe and immune to duplicate args.
         for (const [seq, pending] of pendingCalls.entries()) {
-          if (!pending.resolved && pending.name === event.toolName && JSON.stringify(pending.args) === JSON.stringify(event.args)) {
+          if (!pending.resolved) {
             pending.resolved = true;
-            const tc = toolCalls.find((t) => t.name === event.toolName && JSON.stringify(t.args) === JSON.stringify(event.args));
+            const tc = toolCalls.find((t) => !t.result);
             if (tc) tc.result = event.result?.content?.[0]?.text || "";
             pendingCalls.delete(seq);
             break;
@@ -163,16 +143,23 @@ export class AgentRunner {
       if (process.env.DEBUG) console.warn(`⚠️  Error disposing session: ${e.message}`);
     }
 
+    // Extract last assistant text. Handle both array content blocks and
+    // plain string content. Prefer the last assistant message in order.
     let text = "";
     for (let i = session.messages.length - 1; i >= 0; i--) {
       const m = session.messages[i];
-      if (m.role === "assistant" && m.content) {
-        const blocks = Array.isArray(m.content) ? m.content : [{ text: m.content }];
-        for (const b of blocks) {
-          if (b.type === "text" && b.text) { text = b.text; break; }
-        }
-        if (text) break;
+      if (m.role !== "assistant" || !m.content) continue;
+      if (typeof m.content === "string") {
+        text = m.content;
+        break;
       }
+      if (Array.isArray(m.content)) {
+        // SDK content blocks are a union (TextContent | ThinkingContent | ToolCall).
+        // Only TextContent has a .text field. Check the type tag safely.
+        const textBlock = m.content.find((b: any) => b.type === "text" && typeof b.text === "string");
+        if (textBlock) { text = (textBlock as any).text; break; }
+      }
+      if (text) break;
     }
 
     return { text, toolCalls, error: promptError };

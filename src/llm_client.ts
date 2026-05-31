@@ -1,4 +1,5 @@
 import { OpenAI } from "openai";
+import { Anthropic } from "@anthropic-ai/sdk";
 import type { ChatCompletionMessageParam } from "openai/resources";
 
 // ─── Provider detection ───
@@ -56,9 +57,10 @@ export interface LLMClientOptions {
 }
 
 export interface LLMClient {
-  client: OpenAI;
   model: string;
   provider: Provider;
+  openaiClient?: OpenAI;
+  anthropicClient?: Anthropic;
 }
 
 export function createLLMClient(opts: LLMClientOptions): LLMClient {
@@ -78,13 +80,26 @@ export function createLLMClient(opts: LLMClientOptions): LLMClient {
     throw new Error(`No API key for model ${opts.model}. ${hint}`);
   }
 
+  // Anthropic: use the native Anthropic SDK
+  if (provider === "anthropic") {
+    return {
+      provider,
+      model: modelName || opts.model,
+      anthropicClient: new Anthropic({
+        apiKey,
+        ...(baseUrl ? { baseURL: baseUrl } : {}),
+      }),
+    };
+  }
+
+  // OpenAI / Google / custom: use the OpenAI-compatible SDK
   const clientOpts: { apiKey: string; baseURL?: string } = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
 
   return {
-    client: new OpenAI(clientOpts),
-    model: modelName || opts.model,
     provider,
+    model: modelName || opts.model,
+    openaiClient: new OpenAI(clientOpts),
   };
 }
 
@@ -96,30 +111,61 @@ export async function callLLM(
   temperature: number = 0.7,
   maxTokens: number = 4096,
 ): Promise<string> {
+  // Anthropic: native SDK call
+  if (llm.anthropicClient) {
+    const resp = await llm.anthropicClient.messages.create({
+      model: llm.model,
+      max_tokens: maxTokens,
+      temperature,
+      system: "",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    let text = "";
+    for (const block of resp.content) {
+      if (block.type === "text") text += block.text;
+    }
+    return cleanResponse(text);
+  }
+
+  // OpenAI-compatible (OpenAI, Google, custom)
+  if (!llm.openaiClient) {
+    throw new Error(`No client available for provider ${llm.provider}`);
+  }
+
   const messages: ChatCompletionMessageParam[] = [
     { role: "user", content: prompt },
   ];
 
-  const resp = await llm.client.chat.completions.create({
+  const resp = await llm.openaiClient.chat.completions.create({
     model: llm.model,
     messages,
     temperature,
     max_tokens: maxTokens,
   });
 
-  let text = resp.choices[0]?.message?.content?.trim() || "";
+  const text = resp.choices[0]?.message?.content?.trim() || "";
+  return cleanResponse(text);
+}
 
-  // Strip markdown code fences if present
-  if (text.startsWith("```")) {
-    const inner = text.split("```");
-    text = inner.length >= 3 ? inner[1] : inner[2] || text;
-    // Remove leading language tag like "json\n"
-    if (text.match(/^(json|txt|text|md)\n/)) {
-      text = text.replace(/^(json|txt|text|md)\n/, "");
+// ─── Response cleaning ───
+
+function cleanResponse(text: string): string {
+  let cleaned = text.trim();
+  // Strip markdown code fences — handle multiple fenced blocks by taking
+  // the last one (LLMs often put the final answer in the last fence).
+  if (cleaned.includes("```")) {
+    const blocks = cleaned.split(/```+/);
+    // blocks[0] is before first fence, blocks[1] is inside first fence, etc.
+    // Odd indices are inside fences, even indices are outside.
+    const fencedBlocks = blocks.filter((_, i) => i % 2 === 1);
+    if (fencedBlocks.length > 0) {
+      cleaned = fencedBlocks[fencedBlocks.length - 1];
     }
+    // Remove leading language tag like "json\n"
+    cleaned = cleaned.replace(/^(json|txt|text|md)\n/, "");
   }
-
-  return text.trim();
+  return cleaned.trim();
 }
 
 // ─── JSON parsing ───

@@ -57,7 +57,7 @@ export async function generateRulesFromGaps(
 
     return parsed.map((r, i) => ({
       category: r.category || inferCategory(gaps[i]?.docsNeeded || "", info),
-      content: r.content || gaps[i]?.docsNeeded || "",
+      content: cleanRuleContent(r.content || gaps[i]?.docsNeeded || ""),
       confidence: Math.min(1, Math.max(0, r.confidence || 0.7)),
     }));
   } catch (e: any) {
@@ -74,7 +74,7 @@ function fallbackGenerateRules(
 
   for (const gap of gaps) {
     const category = inferCategory(gap.docsNeeded, info);
-    const content = formatRule(gap.docsNeeded, category);
+    const content = cleanRuleContent(gap.docsNeeded);
 
     if (content) {
       rules.push({
@@ -86,6 +86,23 @@ function fallbackGenerateRules(
   }
 
   return rules;
+}
+
+// Strip common prefixes and formatting artifacts so content is clean plain text.
+// Formatting (headers, bullet points) is handled by consolidate() in llm_score.ts.
+function cleanRuleContent(text: string): string {
+  let content = text.trim();
+
+  // Remove common prefixes
+  content = content.replace(/^(AGENTS\.md should say:|Document:|Rule:|Note:)\s*/i, "");
+
+  // Strip embedded markdown headers (## Setup, ## Testing, etc.)
+  content = content.replace(/^## .+\n?/, "");
+
+  // Strip leading bullet points
+  content = content.replace(/^[-*]\s+/, "");
+
+  return content.trim();
 }
 
 function inferCategory(text: string, info: RepoInfo): string {
@@ -102,28 +119,3 @@ function inferCategory(text: string, info: RepoInfo): string {
   if (lower.includes("gotcha") || lower.includes("pitfall") || lower.includes("watch out")) return "gotchas";
   return "general";
 }
-
-function formatRule(text: string, category: string): string {
-  // Clean up the text into a proper rule format
-  let content = text.trim();
-
-  // Remove common prefixes
-  content = content.replace(/^(AGENTS\.md should say:|Document:|Rule:|Note:)\s*/i, "");
-
-  // Format as a section
-  const displayNames: Record<string, string> = {
-    setup: "Setup",
-    testing: "Testing",
-    conventions: "Conventions",
-    architecture: "Architecture",
-    error_handling: "Error Handling",
-    configuration: "Configuration",
-    git: "Git",
-    deployment: "Deployment",
-    gotchas: "Gotchas",
-    general: "General",
-  };
-
-  return `## ${displayNames[category] || category}\n- ${content}\n`;
-}
-

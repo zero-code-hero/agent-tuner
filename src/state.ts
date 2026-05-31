@@ -87,7 +87,10 @@ export function initState(repoPath: string, maxIterations: number): TunerState {
 export function hasPlateaued(state: TunerState, threshold: number = 0.5): boolean {
   if (state.iterations.length < 2) return false;
   const delta = Math.abs(state.totalScore - state.previousScore);
-  if (delta < threshold) {
+  // Use proportional threshold: for low scores, absolute threshold applies.
+  // For higher scores, require meaningful delta relative to current score.
+  const effectiveThreshold = Math.max(threshold, state.totalScore * 0.05);
+  if (delta < effectiveThreshold) {
     state.plateauCount++;
     return state.plateauCount >= 2;
   }

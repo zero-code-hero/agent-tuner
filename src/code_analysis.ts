@@ -80,47 +80,63 @@ export function analyzeCodeStyle(path: string, languages: string[], allFiles: st
   const findings: string[] = [];
   const files = sampleFiles(path, languages, allFiles, 10);
 
+  // Track aggregated stats per language to avoid per-file duplicates
+  const langStats = new Map<string, {
+    funcStyles: Record<string, number>;
+    indentStyles: Record<string, number>;
+  }>();
+
   for (const file of files) {
     try {
       const content = readFileSync(join(path, file), "utf-8");
       const lines = content.split("\n");
-      const funcStyles: Record<string, number> = { arrow: 0, traditional: 0, class: 0 };
-      const indentStyles: Record<string, number> = { space2: 0, space4: 0, tab: 0 };
-
-      for (const line of lines.slice(0, 50)) {
-        if (line.trim().length === 0) continue;
-        const leading = line.match(/^(\s*)/)?.[1] || "";
-        if (leading.length > 0) {
-          if (leading.includes("\t")) indentStyles.tab++;
-          else if (leading.length % 4 === 0) indentStyles.space4++;
-          else indentStyles.space2++;
-        }
-      }
 
       for (const lang of languages.slice(0, 2)) {
-        if (lang === "typescript" || lang === "javascript") {
-          if (content.includes("=>") && content.includes("const ")) funcStyles.arrow++;
-          if (/\bfunction\s+\w+/.test(content)) funcStyles.traditional++;
-          if (/\bclass\s+\w+/.test(content)) funcStyles.class++;
+        if (!langStats.has(lang)) {
+          langStats.set(lang, {
+            funcStyles: { arrow: 0, traditional: 0, class: 0 },
+            indentStyles: { space2: 0, space4: 0, tab: 0 },
+          });
         }
-        if (lang === "python") {
-          if (content.includes("lambda ")) funcStyles.arrow++;
-          if (/\bdef\s+\w+/.test(content)) funcStyles.traditional++;
-          if (/\bclass\s+\w+/.test(content)) funcStyles.class++;
+        const stats = langStats.get(lang)!;
+
+        for (const line of lines.slice(0, 50)) {
+          if (line.trim().length === 0) continue;
+          const leading = line.match(/^(\s*)/)?.[1] || "";
+          if (leading.length > 0) {
+            if (leading.includes("\t")) stats.indentStyles.tab++;
+            else if (leading.length % 4 === 0) stats.indentStyles.space4++;
+            else stats.indentStyles.space2++;
+          }
         }
 
-        const maxFunc = Object.entries(funcStyles).sort((a, b) => b[1] - a[1])[0];
-        if (maxFunc[1] > 0) findings.push(`${lang} prefers ${maxFunc[0]} function style`);
-        const maxIndent = Object.entries(indentStyles).sort((a, b) => b[1] - a[1])[0];
-        if (maxIndent[1] > 0) {
-          const indentLabel = maxIndent[0] === "space2" ? "2-space" : maxIndent[0] === "space4" ? "4-space" : "tab";
-          findings.push(`${lang} uses ${indentLabel} indentation`);
+        if (lang === "typescript" || lang === "javascript") {
+          if (content.includes("=>") && content.includes("const ")) stats.funcStyles.arrow++;
+          if (/\bfunction\s+\w+/.test(content)) stats.funcStyles.traditional++;
+          if (/\bclass\s+\w+/.test(content)) stats.funcStyles.class++;
+        }
+        if (lang === "python") {
+          if (content.includes("lambda ")) stats.funcStyles.arrow++;
+          if (/\bdef\s+\w+/.test(content)) stats.funcStyles.traditional++;
+          if (/\bclass\s+\w+/.test(content)) stats.funcStyles.class++;
         }
       }
     } catch (e: any) {
       if (process.env.DEBUG) console.warn(`⚠️  Could not read ${file} for style analysis: ${e.message}`);
     }
   }
+
+  // Emit one finding per language, not per file
+  for (const [lang, stats] of langStats.entries()) {
+    const maxFunc = Object.entries(stats.funcStyles).sort((a, b) => b[1] - a[1])[0];
+    if (maxFunc[1] > 0) findings.push(`${lang} prefers ${maxFunc[0]} function style`);
+    const maxIndent = Object.entries(stats.indentStyles).sort((a, b) => b[1] - a[1])[0];
+    if (maxIndent[1] > 0) {
+      const indentLabel = maxIndent[0] === "space2" ? "2-space" : maxIndent[0] === "space4" ? "4-space" : "tab";
+      findings.push(`${lang} uses ${indentLabel} indentation`);
+    }
+  }
+
   return findings;
 }
 

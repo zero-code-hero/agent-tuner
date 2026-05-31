@@ -14,6 +14,10 @@ function cacheKey(path: string, depth: number): string {
   return `${path}:${depth}`;
 }
 
+// Hard cap on context string size to prevent blowing past model limits.
+// Individual sections are already capped; this is a safety net for the total.
+const MAX_CONTEXT_CHARS = 12_000;
+
 function checkGit(path: string): boolean {
   try {
     execSync("git rev-parse --git-dir", { cwd: path, stdio: "pipe" });
@@ -107,7 +111,8 @@ export function discoverAtDepth(path: string, depth: number, state: TunerState):
 
 // Full context — everything the generator/scoring agents need
 export function infoToContext(info: RepoInfo, depthAnalysis: DepthAnalysis, state: TunerState): string {
-  const key = cacheKey(info.path, state.currentIteration);
+  // Use depth for cache key so same iteration at different depths don't collide
+  const key = cacheKey(info.path, state.currentDepth);
   const cached = contextCache.get(key);
   if (cached) return cached;
 
@@ -115,7 +120,7 @@ export function infoToContext(info: RepoInfo, depthAnalysis: DepthAnalysis, stat
     `Repository: ${info.path}`,
     `Language: ${info.topLanguages.join(", ") || "unknown"}`,
     `Files: ${info.numFiles}, Dirs: ${info.numDirs}`,
-    `Iteration: ${state.currentIteration + 1}, Depth: ${state.currentIteration + 1}`,
+    `Iteration: ${state.currentIteration + 1}, Depth: ${state.currentDepth}`,
     "",
   ];
 
@@ -191,7 +196,13 @@ export function infoToContext(info: RepoInfo, depthAnalysis: DepthAnalysis, stat
     }
   }
 
-  const result = lines.join("\n");
+  let result = lines.join("\n");
+
+  // Safety cap: truncate if total context exceeds budget
+  if (result.length > MAX_CONTEXT_CHARS) {
+    result = result.slice(0, MAX_CONTEXT_CHARS) + "\n\n[truncated — context exceeded " + MAX_CONTEXT_CHARS + " char limit]";
+  }
+
   contextCache.set(key, result);
   return result;
 }

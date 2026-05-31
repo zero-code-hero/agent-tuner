@@ -24,18 +24,20 @@ export const LANG_MAP: Record<string, string> = {
 };
 
 export const TOOL_SIGNATURES: Record<string, { type: string; value: string }> = {
-  "package.json": { type: "packageManager", value: "npm/yarn" },
+  // Lockfiles first — more specific than package.json
   "yarn.lock": { type: "packageManager", value: "yarn" },
   "package-lock.json": { type: "packageManager", value: "npm" },
   "pnpm-lock.yaml": { type: "packageManager", value: "pnpm" },
+  "uv.lock": { type: "packageManager", value: "uv" },
+  "poetry.lock": { type: "packageManager", value: "poetry" },
+  // Then generic manifests
+  "package.json": { type: "packageManager", value: "npm/yarn" },
   "Cargo.toml": { type: "packageManager", value: "cargo" },
   "go.mod": { type: "packageManager", value: "go modules" },
   "requirements.txt": { type: "packageManager", value: "pip" },
   "pyproject.toml": { type: "packageManager", value: "pip/setuptools" },
-  "poetry.lock": { type: "packageManager", value: "poetry" },
   "Pipfile": { type: "packageManager", value: "pipenv" },
   "Gemfile": { type: "packageManager", value: "bundler" },
-  "uv.lock": { type: "packageManager", value: "uv" },
   "vitest.config.ts": { type: "testFramework", value: "vitest" },
   "vitest.config.js": { type: "testFramework", value: "vitest" },
   "vitest.config.mts": { type: "testFramework", value: "vitest" },
