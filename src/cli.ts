@@ -9,6 +9,7 @@ import { generateQuestions } from "./questions.js";
 import { testFreshAgent } from "./test_agent.js";
 import { initState, loadState, saveState, hasPlateaued } from "./state.js";
 import type { TunerState, IterationResult, KeptRuleEntry } from "./state.js";
+import type { RepoInfo } from "./types.js";
 
 program
   .name("agent-tuner")
@@ -58,10 +59,10 @@ program
       state = existingState;
       console.log(`📂 Resuming from iteration ${state.currentIteration + 1}\n`);
     } else if (existingState && !opts.resume) {
-      // Warn about existing state
-      console.log(`⚠️  Existing state found at ${path}/.agent-tuner-state.json`);
-      console.log(`   Use --resume to continue, or delete the file to start fresh.\n`);
-      state = existingState;
+      // Refuse to run with stale state — force explicit choice
+      console.log(`❌ Existing state found at ${path}/.agent-tuner-state.json`);
+      console.log(`   Use --resume to continue, or delete the file to start fresh.`);
+      process.exit(1);
     } else {
       clearCaches();
       state = initState(path, parseInt(opts.iterations, 10));
@@ -123,7 +124,7 @@ program
       }));
 
       if (gaps.length > 0) {
-        const newRules = generateRulesFromGaps(info, depthAnalysis, gaps);
+        const newRules = await generateRulesFromGaps(info, depthAnalysis, gaps, state, opts.model, opts.baseUrl);
         console.log(`\n🧠 Scoring ${newRules.length} gap-filling rules...`);
         const scored = await scoreRules(info, depthAnalysis, newRules, state, opts.model, opts.verbose, opts.baseUrl, parseFloat(opts.threshold));
         const kept = filterRules(scored, parseFloat(opts.threshold));
@@ -199,7 +200,7 @@ program
 
 program.parse();
 
-function printDiscovery(info: any) {
+function printDiscovery(info: RepoInfo) {
   console.log(`   Language: ${info.topLanguages.join(", ") || "unknown"}`);
   console.log(`   Files: ${info.numFiles}, Dirs: ${info.numDirs}`);
   if (info.packageManager) console.log(`   Package manager: ${info.packageManager}`);

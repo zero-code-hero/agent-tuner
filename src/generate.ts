@@ -1,14 +1,78 @@
 import type { RepoInfo, DepthAnalysis, Rule } from "./types.js";
+import type { TunerState } from "./state.js";
+import { infoToContext } from "./context_builder.js";
+import { createLLMClient, callLLM, parseJSONResponse } from "./llm_client.js";
 
-export function generateRulesFromGaps(
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+
+const RULE_REFINEMENT_PROMPT = `You are converting observed knowledge gaps into precise AGENTS.md rules.
+
+A fresh agent (with no documentation) failed to answer certain questions about this codebase.
+Convert each gap into a clear, actionable rule that would prevent this failure.
+
+Codebase context:
+{context}
+
+Gaps to convert:
+{gaps}
+
+Rules should be:
+- SPECIFIC: reference actual file names, commands, patterns from this codebase
+- ACTIONABLE: tell the agent exactly what to do
+- CONCISE: one or two sentences max per rule
+- CATEGORIZED: pick the best category from: setup, testing, conventions, architecture, error_handling, configuration, git, ci, deployment, gotchas, general
+
+Respond with ONLY a JSON array, no markdown, no explanation:
+[
+  {{"category": "setup", "content": "the rule text", "confidence": 0.8}},
+  ...
+]`;
+
+export async function generateRulesFromGaps(
   info: RepoInfo,
   depthAnalysis: DepthAnalysis,
   gaps: Array<{ question: string; docsNeeded: string }>,
+  state: TunerState,
+  model: string = DEFAULT_MODEL,
+  baseUrl?: string,
+): Promise<Rule[]> {
+  if (gaps.length === 0) return [];
+
+  const context = infoToContext(info, depthAnalysis, state);
+  const gapsText = gaps.map((g, i) => `Gap #${i}:\n  Question: ${g.question}\n  Needed: ${g.docsNeeded}`).join("\n\n");
+
+  const prompt = RULE_REFINEMENT_PROMPT
+    .replace("{context}", context)
+    .replace("{gaps}", gapsText);
+
+  try {
+    const llm = createLLMClient({ model, baseUrl });
+    const text = await callLLM(llm, prompt, 0.3, 3000);
+
+    const parsed = parseJSONResponse<Array<{ category: string; content: string; confidence: number }>>(text, []);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      if (process.env.DEBUG) console.warn("⚠️  LLM rule refinement returned invalid JSON, falling back to deterministic generation");
+      return fallbackGenerateRules(gaps, info);
+    }
+
+    return parsed.map((r, i) => ({
+      category: r.category || inferCategory(gaps[i]?.docsNeeded || "", info),
+      content: r.content || gaps[i]?.docsNeeded || "",
+      confidence: Math.min(1, Math.max(0, r.confidence || 0.7)),
+    }));
+  } catch (e: any) {
+    if (process.env.DEBUG) console.warn(`⚠️  LLM rule refinement failed (${e.message}), falling back to deterministic generation`);
+    return fallbackGenerateRules(gaps, info);
+  }
+}
+
+function fallbackGenerateRules(
+  gaps: Array<{ question: string; docsNeeded: string }>,
+  info: RepoInfo,
 ): Rule[] {
   const rules: Rule[] = [];
 
   for (const gap of gaps) {
-    // Extract category from the docsNeeded text
     const category = inferCategory(gap.docsNeeded, info);
     const content = formatRule(gap.docsNeeded, category);
 
@@ -16,7 +80,7 @@ export function generateRulesFromGaps(
       rules.push({
         category,
         content,
-        confidence: 0.7, // Start high — these are from actual failures
+        confidence: 0.7,
       });
     }
   }

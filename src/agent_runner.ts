@@ -66,16 +66,45 @@ export class AgentRunner {
       }),
     });
 
+    // ─── Context file override ───
+    // agentsFilesOverride is an internal pi SDK hook. If it's missing or fails
+    // and noContextFiles is set, the fresh-agent test is invalid — fail loud.
+    const loaderAny = loader as any;
+    const hasOverride = typeof loaderAny.agentsFilesOverride !== "undefined";
+
     if (this.noContextFiles) {
-      (loader as any).agentsFilesOverride = () => ({ agentsFiles: [] });
-    } else if (this.customContext) {
-      const orig: any = (loader as any).agentsFilesOverride;
-      (loader as any).agentsFilesOverride = (current: any) => ({
-        agentsFiles: [
-          ...(orig ? orig(current).agentsFiles : current.agentsFiles),
-          { path: "/virtual/context.md", content: this.customContext },
-        ],
-      });
+      if (!hasOverride) {
+        return {
+          text: "",
+          toolCalls: [],
+          error:
+            "Cannot run fresh-agent test: Pi SDK does not expose agentsFilesOverride. " +
+            "The test requires stripping AGENTS.md/CLAUDE.md but the SDK version doesn't support it.",
+        };
+      }
+      try {
+        loaderAny.agentsFilesOverride = () => ({ agentsFiles: [] });
+      } catch (e: any) {
+        return {
+          text: "",
+          toolCalls: [],
+          error: `Failed to strip context files for fresh-agent test: ${e.message}`,
+        };
+      }
+    } else if (this.customContext && hasOverride) {
+      try {
+        const orig = loaderAny.agentsFilesOverride;
+        loaderAny.agentsFilesOverride = (current: any) => ({
+          agentsFiles: [
+            ...(orig ? orig(current).agentsFiles : current.agentsFiles),
+            { path: "/virtual/context.md", content: this.customContext },
+          ],
+        });
+      } catch (e: any) {
+        if (process.env.DEBUG) console.warn(`⚠️  Failed to inject custom context: ${e.message}`);
+      }
+    } else if (this.customContext && !hasOverride) {
+      if (process.env.DEBUG) console.warn("⚠️  Custom context requested but agentsFilesOverride not available — skipping injection");
     }
 
     await loader.reload();
@@ -89,18 +118,29 @@ export class AgentRunner {
       sessionManager: SessionManager.inMemory(),
     });
 
+    // Pending tool call queue — keyed by sequence ID to avoid race conditions
+    const pendingCalls = new Map<number, { name: string; args: any; resolved: boolean }>();
+    let nextSeq = 0;
     const toolCalls: Array<{ name: string; args: any; result?: string }> = [];
     let turnCount = 0;
 
     const unsub = session.subscribe((event: any) => {
       if (event.type === "tool_execution_start") {
+        const seq = nextSeq++;
+        pendingCalls.set(seq, { name: event.toolName, args: event.args, resolved: false });
         toolCalls.push({ name: event.toolName, args: event.args });
       }
       if (event.type === "tool_execution_end") {
-        const tc = toolCalls.find(
-          (t) => t.name === event.toolName && JSON.stringify(t.args) === JSON.stringify(event.args)
-        );
-        if (tc) tc.result = event.result?.content?.[0]?.text || "";
+        // Match by finding the first unresolved pending call with matching name+args
+        for (const [seq, pending] of pendingCalls.entries()) {
+          if (!pending.resolved && pending.name === event.toolName && JSON.stringify(pending.args) === JSON.stringify(event.args)) {
+            pending.resolved = true;
+            const tc = toolCalls.find((t) => t.name === event.toolName && JSON.stringify(t.args) === JSON.stringify(event.args));
+            if (tc) tc.result = event.result?.content?.[0]?.text || "";
+            pendingCalls.delete(seq);
+            break;
+          }
+        }
       }
       if (event.type === "turn_start") {
         turnCount++;
@@ -108,12 +148,20 @@ export class AgentRunner {
       }
     });
 
+    let promptError: string | undefined;
     try {
       await session.prompt(prompt);
-    } catch {}
+    } catch (e: any) {
+      promptError = e.message || String(e);
+    }
 
     unsub();
-    session.dispose();
+    try {
+      session.dispose();
+    } catch (e: any) {
+      // dispose can throw if session is already disposed or in bad state
+      if (process.env.DEBUG) console.warn(`⚠️  Error disposing session: ${e.message}`);
+    }
 
     let text = "";
     for (let i = session.messages.length - 1; i >= 0; i--) {
@@ -127,7 +175,7 @@ export class AgentRunner {
       }
     }
 
-    return { text, toolCalls };
+    return { text, toolCalls, error: promptError };
   }
 
   // ─── Claude Code CLI backend ───

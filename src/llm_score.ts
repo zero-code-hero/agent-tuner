@@ -109,19 +109,19 @@ export async function scoreRules(
       }
     }
 
-    // Warn about rules the scorer missed
+    // Discard rules the scorer missed — we can't trust unscored rules
     const missedIndices: number[] = [];
     for (let i = 0; i < rules.length; i++) {
       if (!scoredIndices.has(i)) missedIndices.push(i);
     }
     if (missedIndices.length > 0) {
-      console.warn(`⚠️  Scorer missed ${missedIndices.length} rule(s) (indices: ${missedIndices.join(", ")}). Auto-scoring at threshold.`);
+      console.warn(`⚠️  Scorer missed ${missedIndices.length} rule(s) (indices: ${missedIndices.join(", ")}). Discarding.`);
       for (const i of missedIndices) {
         scored.push({
           index: i,
-          score: threshold,
-          keep: true,
-          reason: "auto-scored: not evaluated by LLM",
+          score: 0,
+          keep: false,
+          reason: "not evaluated by LLM scorer — discarded",
           original: rules[i],
         });
       }
