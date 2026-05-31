@@ -45,9 +45,6 @@ npm run build
 # Full loop (default: 5 iterations)
 npx tsx src/cli.ts ./my-project
 
-# Single pass — scan and generate, no loop
-npx tsx src/cli.ts ./my-project --once
-
 # Dry run
 npx tsx src/cli.ts ./my-project --dry-run
 
@@ -91,7 +88,6 @@ export LLM_API_KEY="..."         # fallback / custom endpoints
 | `-v, --verbose` | Show details | off |
 | `--dry-run` | Print without writing | off |
 | `--merge` | Merge with existing | off |
-| `--once` | Single pass (no loop) | off |
 | `--resume` | Resume from saved state | off |
 
 ## State

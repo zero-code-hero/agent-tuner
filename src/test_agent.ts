@@ -2,6 +2,7 @@ import type { RepoInfo, DepthAnalysis } from "./types.js";
 import type { TunerState, Question, QuestionResult } from "./state.js";
 import { freshAgentContext } from "./context_builder.js";
 import { AgentRunner } from "./agent_runner.js";
+import { tryParseJsonArray } from "./json_parse.js";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
 
@@ -29,30 +30,6 @@ Questions:
 Codebase info:
 {context}`;
 
-function tryParseJsonArray(text: string): Array<any> | null {
-  let cleaned = text;
-  if (cleaned.startsWith("```")) {
-    const inner = cleaned.split("```");
-    cleaned = inner.length >= 3 ? inner[1] : inner[2] || cleaned;
-    if (cleaned.match(/^(json|txt|text)\n/)) {
-      cleaned = cleaned.replace(/^(json|txt|text)\n/, "");
-    }
-  }
-  cleaned = cleaned.trim();
-  const bracketMatch = cleaned.match(/\[[\s\S]*\]/);
-  if (bracketMatch) {
-    try {
-      const parsed = JSON.parse(bracketMatch[0]);
-      if (Array.isArray(parsed)) return parsed;
-    } catch {}
-  }
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed)) return parsed;
-  } catch {}
-  return null;
-}
-
 export async function testFreshAgent(
   info: RepoInfo,
   depthAnalysis: DepthAnalysis,
@@ -71,59 +48,74 @@ export async function testFreshAgent(
     .replace("{questions}", questionsText)
     .replace("{context}", freshContext);
 
-  const runner = new AgentRunner({
-    cwd: info.path,
-    model,
-    thinkingLevel: "off",
-    noContextFiles: true, // CRITICAL: strip AGENTS.md / CLAUDE.md
-    maxTurns: 30,
-    baseUrl,
-  });
+  let lastError: unknown;
+  const maxRetries = 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const runner = new AgentRunner({
+      cwd: info.path,
+      model,
+      thinkingLevel: "off",
+      noContextFiles: true, // CRITICAL: strip AGENTS.md / CLAUDE.md
+      maxTurns: 30,
+      baseUrl,
+    });
 
-  const result = await runner.run(prompt);
-  if (result.error && !result.text) {
-    throw new Error(`Fresh agent failed: ${result.error}`);
-  }
-
-  const parsed = tryParseJsonArray(result.text);
-  if (!parsed) {
-    throw new Error("Fresh agent returned non-JSON");
-  }
-
-  const results: QuestionResult[] = [];
-  const parsedSet = new Map(parsed.map((r: any) => [r.questionId, r]));
-
-  for (const q of questions) {
-    const r = parsedSet.get(q.id);
-    if (r) {
-      results.push({
-        questionId: r.questionId,
-        answered: Boolean(r.answered),
-        answer: r.answer || undefined,
-        confidence: Math.min(1, Math.max(0, r.confidence || 0)),
-        evidence: r.evidence || [],
-        failureReason: r.failureReason || undefined,
-        docsNeeded: r.docsNeeded || undefined,
-      });
-    } else {
-      results.push({
-        questionId: q.id,
-        answered: false,
-        confidence: 0,
-        evidence: [],
-        failureReason: "Test agent did not respond to this question",
-        docsNeeded: `Document: ${q.text}`,
-      });
+    const result = await runner.run(prompt);
+    if (result.error && !result.text) {
+      lastError = new Error(`Fresh agent failed: ${result.error}`);
+      if (attempt < maxRetries) {
+        if (process.env.DEBUG) console.warn(`⚠️  Fresh agent attempt ${attempt + 1} failed (${result.error}), retrying...`);
+        continue;
+      }
+      throw lastError;
     }
-  }
 
-  if (process.env.DEBUG) {
-    console.log(`🔧 Fresh agent made ${result.toolCalls.length} tool calls`);
-    for (const tc of result.toolCalls) {
-      const preview = (tc.result || "(no result)").slice(0, 80);
-      console.log(`   ${tc.name}(${JSON.stringify(tc.args).slice(0, 60)}) → ${preview}`);
+    const parsed = tryParseJsonArray(result.text);
+    if (!parsed) {
+      lastError = new Error("Fresh agent returned non-JSON");
+      if (attempt < maxRetries) {
+        if (process.env.DEBUG) console.warn(`⚠️  Fresh agent attempt ${attempt + 1} returned non-JSON, retrying...`);
+        continue;
+      }
+      throw lastError;
     }
-  }
 
-  return results;
+    const results: QuestionResult[] = [];
+    const parsedSet = new Map(parsed.map((r: any) => [r.questionId, r]));
+
+    for (const q of questions) {
+      const r = parsedSet.get(q.id);
+      if (r) {
+        results.push({
+          questionId: r.questionId,
+          answered: Boolean(r.answered),
+          answer: r.answer || undefined,
+          confidence: Math.min(1, Math.max(0, r.confidence || 0)),
+          evidence: r.evidence || [],
+          failureReason: r.failureReason || undefined,
+          docsNeeded: r.docsNeeded || undefined,
+        });
+      } else {
+        results.push({
+          questionId: q.id,
+          answered: false,
+          confidence: 0,
+          evidence: [],
+          failureReason: "Test agent did not respond to this question",
+          docsNeeded: `Document: ${q.text}`,
+        });
+      }
+    }
+
+    if (process.env.DEBUG) {
+      console.log(`🔧 Fresh agent made ${result.toolCalls.length} tool calls`);
+      for (const tc of result.toolCalls) {
+        const preview = (tc.result || "(no result)").slice(0, 80);
+        console.log(`   ${tc.name}(${JSON.stringify(tc.args).slice(0, 60)}) → ${preview}`);
+      }
+    }
+
+    return results;
+  }
+  throw lastError;
 }

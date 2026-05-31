@@ -65,6 +65,7 @@ export async function scoreRules(
   model: string = DEFAULT_MODEL,
   verbose: boolean = false,
   baseUrl?: string,
+  threshold: number = 6,
 ): Promise<ScoredRule[]> {
   const context = infoToContext(info, depthAnalysis, state);
   const rulesText = rules.map((r, i) => `--- Rule #${i} (category: ${r.category}) ---\n${r.content}`).join("\n\n");
@@ -88,6 +89,7 @@ export async function scoreRules(
     }
 
     const scored: ScoredRule[] = [];
+    const scoredIndices = new Set<number>();
     for (const r of results) {
       if (r.index < rules.length) {
         scored.push({
@@ -98,11 +100,30 @@ export async function scoreRules(
           suggestion: r.suggestion,
           original: rules[r.index],
         });
+        scoredIndices.add(r.index);
 
         if (verbose) {
           const status = r.score >= 7 ? "✅" : r.score >= 5 ? "🔶" : "❌";
           console.log(`  ${status} Rule #${r.index} [${rules[r.index].category}]: ${r.score} — ${r.reason}`);
         }
+      }
+    }
+
+    // Warn about rules the scorer missed
+    const missedIndices: number[] = [];
+    for (let i = 0; i < rules.length; i++) {
+      if (!scoredIndices.has(i)) missedIndices.push(i);
+    }
+    if (missedIndices.length > 0) {
+      console.warn(`⚠️  Scorer missed ${missedIndices.length} rule(s) (indices: ${missedIndices.join(", ")}). Auto-scoring at threshold.`);
+      for (const i of missedIndices) {
+        scored.push({
+          index: i,
+          score: threshold,
+          keep: true,
+          reason: "auto-scored: not evaluated by LLM",
+          original: rules[i],
+        });
       }
     }
 

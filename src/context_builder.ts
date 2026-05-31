@@ -134,37 +134,46 @@ export function infoToContext(info: RepoInfo, depthAnalysis: DepthAnalysis, stat
   if (info.namingPatterns) lines.push(`\nNaming: ${info.namingPatterns}`);
   if (info.projectStructure) lines.push(`\nStructure:\n${info.projectStructure}`);
 
+  // Token budget per section — prevents context overflow on large repos
+  const MAX_SECTION_ITEMS = 8; // keep analysis sections tight
+  const MAX_SECTION_CHARS = 500; // hard char cap per section
+
   if (depthAnalysis.importPatterns.length > 0) {
     lines.push("\nImport patterns (sample):");
-    for (const imp of depthAnalysis.importPatterns.slice(0, 12)) lines.push(`  ${imp}`);
+    for (const imp of depthAnalysis.importPatterns.slice(0, MAX_SECTION_ITEMS)) lines.push(`  ${imp}`);
   }
   if (depthAnalysis.errorPatterns.length > 0) {
     lines.push("\nError handling (sample):");
-    for (const err of depthAnalysis.errorPatterns.slice(0, 10)) lines.push(`  ${err}`);
+    const errText = depthAnalysis.errorPatterns.slice(0, MAX_SECTION_ITEMS).join("\n");
+    lines.push(errText.length > MAX_SECTION_CHARS ? errText.slice(0, MAX_SECTION_CHARS) + "…" : errText);
   }
   if (depthAnalysis.codeStyle.length > 0) {
     lines.push("\nCode style:");
-    for (const cs of depthAnalysis.codeStyle) lines.push(`  ${cs}`);
+    const csText = depthAnalysis.codeStyle.slice(0, MAX_SECTION_ITEMS).join("\n");
+    lines.push(csText.length > MAX_SECTION_CHARS ? csText.slice(0, MAX_SECTION_CHARS) + "…" : csText);
   }
   if (depthAnalysis.architecture.length > 0) {
     lines.push("\nArchitecture:");
-    for (const arch of depthAnalysis.architecture) lines.push(`  ${arch}`);
+    const archText = depthAnalysis.architecture.slice(0, MAX_SECTION_ITEMS).join("\n");
+    lines.push(archText.length > MAX_SECTION_CHARS ? archText.slice(0, MAX_SECTION_CHARS) + "…" : archText);
   }
   if (depthAnalysis.envVars.length > 0) {
     lines.push("\nEnvironment:");
-    for (const env of depthAnalysis.envVars) lines.push(`  ${env}`);
+    const envText = depthAnalysis.envVars.slice(0, MAX_SECTION_ITEMS).join("\n");
+    lines.push(envText.length > MAX_SECTION_CHARS ? envText.slice(0, MAX_SECTION_CHARS) + "…" : envText);
   }
   if (depthAnalysis.antiPatterns.length > 0) {
     lines.push("\nAnti-patterns / gotchas:");
-    for (const ap of depthAnalysis.antiPatterns) lines.push(`  ${ap}`);
+    const apText = depthAnalysis.antiPatterns.slice(0, MAX_SECTION_ITEMS).join("\n");
+    lines.push(apText.length > MAX_SECTION_CHARS ? apText.slice(0, MAX_SECTION_CHARS) + "…" : apText);
   }
   if (depthAnalysis.branching.length > 0) {
     lines.push("\nBranching:");
-    for (const br of depthAnalysis.branching) lines.push(`  ${br}`);
+    for (const br of depthAnalysis.branching.slice(0, MAX_SECTION_ITEMS)) lines.push(`  ${br}`);
   }
   if (depthAnalysis.dependencies.length > 0) {
     lines.push("\nDependencies:");
-    for (const dep of depthAnalysis.dependencies) lines.push(`  ${dep}`);
+    for (const dep of depthAnalysis.dependencies.slice(0, MAX_SECTION_ITEMS)) lines.push(`  ${dep}`);
   }
   if (depthAnalysis.readmeContent) lines.push(`\nREADME (excerpt):\n${depthAnalysis.readmeContent}`);
   if (info.existingAgentsMd) lines.push(`\nExisting agent doc:\n${info.existingAgentsMd.slice(0, 2000)}`);

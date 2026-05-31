@@ -2,6 +2,7 @@ import type { RepoInfo, DepthAnalysis } from "./types.js";
 import type { TunerState, Question } from "./state.js";
 import { infoToContext } from "./context_builder.js";
 import { AgentRunner } from "./agent_runner.js";
+import { tryParseJsonArray } from "./json_parse.js";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
 
@@ -37,30 +38,6 @@ Respond with ONLY a JSON array, no markdown, no explanation:
   ...
 ]`;
 
-function tryParseJsonArray(text: string): Array<any> | null {
-  let cleaned = text;
-  if (cleaned.startsWith("```")) {
-    const inner = cleaned.split("```");
-    cleaned = inner.length >= 3 ? inner[1] : inner[2] || cleaned;
-    if (cleaned.match(/^(json|txt|text)\n/)) {
-      cleaned = cleaned.replace(/^(json|txt|text)\n/, "");
-    }
-  }
-  cleaned = cleaned.trim();
-  const bracketMatch = cleaned.match(/\[[\s\S]*\]/);
-  if (bracketMatch) {
-    try {
-      const parsed = JSON.parse(bracketMatch[0]);
-      if (Array.isArray(parsed)) return parsed;
-    } catch {}
-  }
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed)) return parsed;
-  } catch {}
-  return null;
-}
-
 function normalize(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -93,31 +70,48 @@ export async function generateQuestions(
     .replace("{previousQuestions}", previousQuestions)
     .replace("{previousFailures}", previousFailures);
 
-  const runner = new AgentRunner({
-    cwd: info.path,
-    model,
-    thinkingLevel: "off",
-    noContextFiles: false, // generator can see existing docs
-    maxTurns: 20,
-    baseUrl,
-  });
+  let lastError: unknown;
+  const maxRetries = 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const runner = new AgentRunner({
+      cwd: info.path,
+      model,
+      thinkingLevel: "off",
+      noContextFiles: false, // generator can see existing docs
+      maxTurns: 20,
+      baseUrl,
+    });
 
-  const result = await runner.run(prompt);
-  if (result.error) throw new Error(`Question generation failed: ${result.error}`);
+    const result = await runner.run(prompt);
+    if (result.error && !result.text) {
+      lastError = new Error(`Question generation failed: ${result.error}`);
+      if (attempt < maxRetries) {
+        if (process.env.DEBUG) console.warn(`⚠️  Question generation attempt ${attempt + 1} failed (${result.error}), retrying...`);
+        continue;
+      }
+      throw lastError;
+    }
 
-  const parsed = tryParseJsonArray(result.text);
-  if (!parsed || !Array.isArray(parsed)) {
-    throw new Error("Question generator returned non-JSON");
+    const parsed = tryParseJsonArray(result.text);
+    if (!parsed || !Array.isArray(parsed)) {
+      lastError = new Error("Question generator returned non-JSON");
+      if (attempt < maxRetries) {
+        if (process.env.DEBUG) console.warn(`⚠️  Question generation attempt ${attempt + 1} returned non-JSON, retrying...`);
+        continue;
+      }
+      throw lastError;
+    }
+
+    const askedTexts = new Set(state.allQuestions.map((q) => normalize(q.text)));
+    const unique = parsed.filter((q: any) => !askedTexts.has(normalize(q.text)));
+
+    return unique.map((q: any, i: number) => ({
+      id: `iter${state.currentIteration}_q${i}`,
+      text: q.text,
+      category: q.category || "general",
+      difficulty: q.difficulty || 1,
+      depth,
+    }));
   }
-
-  const askedTexts = new Set(state.allQuestions.map((q) => normalize(q.text)));
-  const unique = parsed.filter((q: any) => !askedTexts.has(normalize(q.text)));
-
-  return unique.map((q: any, i: number) => ({
-    id: `iter${state.currentIteration}_q${i}`,
-    text: q.text,
-    category: q.category || "general",
-    difficulty: q.difficulty || 1,
-    depth,
-  }));
+  throw lastError;
 }
