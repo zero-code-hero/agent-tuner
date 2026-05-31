@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { DEFAULT_MODEL } from "./constants.js";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, ModelRegistry, AuthStorage } from "@earendil-works/pi-coding-agent";
 
 // ThinkingLevel is internal to pi-agent-core and not re-exported.
@@ -36,7 +37,7 @@ export class AgentRunner {
 
   constructor(opts: RunnerOptions) {
     this.cwd = opts.cwd;
-    this.model = opts.model || "anthropic/claude-sonnet-4-20250514";
+    this.model = opts.model || DEFAULT_MODEL;
     this.thinkingLevel = (opts.thinkingLevel || "off") as ThinkingLevel;
     this.noContextFiles = opts.noContextFiles || false;
     this.customContext = opts.customContext;
@@ -66,6 +67,22 @@ export class AgentRunner {
 
     // Build loader options using the public constructor — no `as any` hacks.
     // DefaultResourceLoader accepts noContextFiles and agentsFilesOverride natively.
+    // agentsFilesOverride receives the resolved agents files config; we extend it
+    // with a virtual context file. Type the callback param as the shape the SDK passes.
+    type AgentsFilesEntry = { path: string; content: string };
+    type AgentsFilesConfig = { agentsFiles: AgentsFilesEntry[] };
+    type AgentsFilesOverride = (base: AgentsFilesConfig) => AgentsFilesConfig;
+
+    const customCtx = this.customContext;
+    const overrideFn: AgentsFilesOverride | undefined = customCtx
+      ? (base: AgentsFilesConfig) => ({
+          agentsFiles: [
+            ...base.agentsFiles,
+            { path: "/virtual/context.md", content: customCtx },
+          ],
+        })
+      : undefined;
+
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
@@ -74,14 +91,7 @@ export class AgentRunner {
         retry: { enabled: true, maxRetries: 2 },
       }),
       noContextFiles: this.noContextFiles,
-      ...(this.customContext ? {
-        agentsFilesOverride: (base: any) => ({
-          agentsFiles: [
-            ...base.agentsFiles,
-            { path: "/virtual/context.md", content: this.customContext },
-          ],
-        }),
-      } : {}),
+      ...(overrideFn ? { agentsFilesOverride: overrideFn } : {}),
     });
     await loader.reload();
 
@@ -95,30 +105,43 @@ export class AgentRunner {
     });
 
     // Pending tool call queue — keyed by sequence ID for 1:1 correlation
-    // between execution_start and execution_end events. Avoids fragile
-    // JSON.stringify arg matching that breaks on unordered keys or functions.
-    const pendingCalls = new Map<number, { name: string; args: any; resolved: boolean }>();
+    // between execution_start and execution_end events. The SDK emits a
+    // `toolCallId` on both events when available; fall back to strict FIFO
+    // when it doesn't. This handles both sequential and parallel tool calls.
+    const pendingCalls = new Map<string, { name: string; args: any; resolved: boolean }>();
     let nextSeq = 0;
     const toolCalls: Array<{ name: string; args: any; result?: string }> = [];
     let turnCount = 0;
 
     const unsub = session.subscribe((event: any) => {
       if (event.type === "tool_execution_start") {
-        const seq = nextSeq++;
-        pendingCalls.set(seq, { name: event.toolName, args: event.args, resolved: false });
+        // Prefer the SDK's own toolCallId; synthesize a sequence key as fallback.
+        const key = event.toolCallId ?? `seq:${nextSeq++}`;
+        pendingCalls.set(key, { name: event.toolName, args: event.args, resolved: false });
         toolCalls.push({ name: event.toolName, args: event.args });
       }
       if (event.type === "tool_execution_end") {
-        // Match by sequence: pop the oldest unresolved pending call.
-        // The SDK emits start/end in strict order per tool invocation,
-        // so FIFO correlation is safe and immune to duplicate args.
-        for (const [seq, pending] of pendingCalls.entries()) {
-          if (!pending.resolved) {
+        // Match by toolCallId if the SDK provides it, otherwise pop the oldest
+        // unresolved pending call (FIFO — safe for sequential invocations).
+        const endKey = event.toolCallId ?? null;
+        let targetKey: string | null = endKey ?? null;
+
+        if (targetKey && pendingCalls.has(targetKey)) {
+          // direct match
+        } else {
+          // FIFO fallback: find oldest unresolved
+          for (const [k, pending] of pendingCalls.entries()) {
+            if (!pending.resolved) { targetKey = k; break; }
+          }
+        }
+
+        if (targetKey) {
+          const pending = pendingCalls.get(targetKey);
+          if (pending && !pending.resolved) {
             pending.resolved = true;
             const tc = toolCalls.find((t) => !t.result);
             if (tc) tc.result = event.result?.content?.[0]?.text || "";
-            pendingCalls.delete(seq);
-            break;
+            pendingCalls.delete(targetKey);
           }
         }
       }

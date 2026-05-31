@@ -1,8 +1,10 @@
 export const SKIP_DIRS = new Set([
   ".git", "node_modules", "__pycache__", ".venv", "venv",
   ".next", "dist", "build", ".cache", ".pi", ".pi-coding-agent",
-  ".svelte-kit", ".output", ".nuxt", ".agent-tuner-state.json",
+  ".svelte-kit", ".output", ".nuxt",
 ]);
+
+export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
 
 export const DOC_PATTERNS = new Set([
   "README.md", "README.txt", "README.rst",

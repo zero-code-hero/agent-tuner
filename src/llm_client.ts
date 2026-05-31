@@ -1,6 +1,7 @@
 import { OpenAI } from "openai";
 import { Anthropic } from "@anthropic-ai/sdk";
 import type { ChatCompletionMessageParam } from "openai/resources";
+import { tryParseJsonObject } from "./json_parse.js";
 
 // ─── Provider detection ───
 
@@ -149,13 +150,17 @@ export async function callLLM(
 }
 
 // ─── Response cleaning ───
-
+// Try to return clean text without aggressively stripping content.
+// Only extract from fences when the outer text won't parse as-is.
 function cleanResponse(text: string): string {
   let cleaned = text.trim();
-  // Strip markdown code fences — handle multiple fenced blocks by taking
-  // the last one (LLMs often put the final answer in the last fence).
-  // Use a regex that matches balanced ``` pairs instead of naive splitting,
-  // which breaks on odd numbers of fence markers (e.g. nested code examples).
+
+  // If it already parses as JSON, return it directly — no fence stripping needed.
+  try { JSON.parse(cleaned); return cleaned; } catch {}
+
+  // Only strip fences as a fallback. Take the last fenced block (LLMs often
+  // put the final answer in the last fence). Use a regex that matches balanced
+  // ``` pairs instead of naive splitting, which breaks on odd fence counts.
   if (cleaned.includes("```")) {
     const fenceRegex = /```(?:\w*)\n?([\s\S]*?)```/g;
     let lastMatch: string | null = null;
@@ -172,27 +177,8 @@ function cleanResponse(text: string): string {
   return cleaned.trim();
 }
 
-// ─── JSON parsing ───
+// ─── JSON parsing (delegated to unified parser in json_parse.ts) ───
 
 export function parseJSONResponse<T>(text: string, fallback: T): T {
-  // Try direct parse first
-  try { return JSON.parse(text) as T; } catch {}
-
-  // Try to extract JSON from markdown code fences
-  const fenceMatch = text.match(/```(?:json|txt|text)?\n([\s\S]*?)\n```/);
-  if (fenceMatch) {
-    try { return JSON.parse(fenceMatch[1]) as T; } catch {}
-  }
-
-  // Try to find a JSON object or array in the text
-  const objMatch = text.match(/\{[\s\S]*\}/);
-  if (objMatch) {
-    try { return JSON.parse(objMatch[0]) as T; } catch {}
-  }
-  const arrMatch = text.match(/\[[\s\S]*\]/);
-  if (arrMatch) {
-    try { return JSON.parse(arrMatch[0]) as T; } catch {}
-  }
-
-  return fallback;
+  return tryParseJsonObject(text, fallback);
 }

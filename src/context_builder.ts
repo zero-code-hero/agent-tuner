@@ -276,35 +276,40 @@ export function infoToContext(info: RepoInfo, depthAnalysis: DepthAnalysis, stat
     }
   }
 
-  // ── Assemble: build all, then drop from lowest priority if over budget ──
-  const built = new Map<number, string>();
-  for (const sec of sections) {
-    const content = sec.build();
-    if (content) built.set(built.size, content);
+  // ── Assemble: build all sections into indexable array ──
+  // Each entry: { section, content, included }. We toggle `included` instead of
+  // string-replacing, so we never accidentally cut the wrong section.
+  interface BuiltSection {
+    section: Section;
+    content: string;
+    included: boolean;
   }
 
-  let result = Array.from(built.values()).join("\n\n");
+  const built: BuiltSection[] = [];
+  for (const sec of sections) {
+    const content = sec.build();
+    if (content) built.push({ section: sec, content, included: true });
+  }
+
+  function assemble(): string {
+    return built.filter((s) => s.included).map((s) => s.content).join("\n\n");
+  }
+
+  let result = assemble();
 
   // If over budget, iteratively drop the lowest-priority sections
   if (result.length > MAX_CONTEXT_CHARS) {
     const dropped: string[] = [];
-    // Sort sections by priority descending (drop tier 4 first, then 3, etc.)
-    const sorted = [...sections].sort((a, b) => b.priority - a.priority);
+    // Sort by priority descending (drop tier 4 first, then 3, etc.)
+    const sorted = [...built].sort((a, b) => b.section.priority - a.section.priority);
 
-    for (const sec of sorted) {
+    for (const entry of sorted) {
       if (result.length <= MAX_CONTEXT_CHARS) break;
-      const content = sec.build();
-      if (content && result.includes(content)) {
-        result = result.replace("\n\n" + content + "\n\n", "\n\n");
-        result = result.replace(content + "\n\n", "");
-        result = result.replace("\n\n" + content, "");
-        result = result.replace(content, "");
-        dropped.push(sec.label);
-      }
+      if (!entry.included) continue;
+      entry.included = false;
+      dropped.push(entry.section.label);
+      result = assemble();
     }
-
-    // Clean up any double-blank lines from removal
-    result = result.replace(/\n{3,}/g, "\n\n").trim();
 
     if (dropped.length > 0) {
       result += `\n\n[context trimmed: dropped ${dropped.join(", ")} to stay within budget]`;

@@ -3,7 +3,7 @@ import type { TunerState } from "./state.js";
 import { infoToContext } from "./context_builder.js";
 import { createLLMClient, callLLM, parseJSONResponse } from "./llm_client.js";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
+import { DEFAULT_MODEL } from "./constants.js";
 
 const SCORE_PROMPT = `You are evaluating candidate rules for an AGENTS.md file. This file guides AI agents working in a codebase.
 

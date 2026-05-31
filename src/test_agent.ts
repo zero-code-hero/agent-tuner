@@ -4,7 +4,7 @@ import { freshAgentContext } from "./context_builder.js";
 import { AgentRunner } from "./agent_runner.js";
 import { tryParseJsonArray } from "./json_parse.js";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+import { DEFAULT_MODEL } from "./constants.js";
 
 const TEST_AGENT_PROMPT = `You are a completely FRESH AI agent dropped into this codebase.
 

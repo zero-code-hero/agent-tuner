@@ -2,6 +2,7 @@
 import { resolve } from "path";
 import { writeFileSync, existsSync, readFileSync } from "fs";
 import { program } from "commander";
+import { DEFAULT_MODEL } from "./constants.js";
 import { discoverAtDepth, clearCaches } from "./context_builder.js";
 import { generateRulesFromGaps } from "./generate.js";
 import { scoreRules, filterRules, consolidate } from "./llm_score.js";
@@ -16,7 +17,7 @@ program
   .description("Generate optimized AGENTS.md via adversarial self-improvement loop")
   .argument("<repo>", "Path to the repository")
   .option("-o, --output <path>", "Output file path", "AGENTS.md")
-  .option("-m, --model <model>", "LLM model", "anthropic/claude-sonnet-4-5-20250929")
+  .option("-m, --model <model>", "LLM model", DEFAULT_MODEL)
   .option("-t, --threshold <n>", "Minimum score to keep a rule (1-10)", "6")
   .option("-n, --iterations <n>", "Max iterations", "5")
   .option("--dry-run", "Print output without writing file")

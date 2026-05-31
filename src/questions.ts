@@ -4,7 +4,7 @@ import { infoToContext } from "./context_builder.js";
 import { AgentRunner } from "./agent_runner.js";
 import { tryParseJsonArray } from "./json_parse.js";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+import { DEFAULT_MODEL } from "./constants.js";
 
 const QUESTION_GENERATOR_PROMPT = `You are an adversarial question generator. Explore this codebase deeply and generate questions that would stump a NEW developer (or AI agent) with NO prior knowledge.
 

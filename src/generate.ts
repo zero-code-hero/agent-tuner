@@ -3,7 +3,7 @@ import type { TunerState } from "./state.js";
 import { infoToContext } from "./context_builder.js";
 import { createLLMClient, callLLM, parseJSONResponse } from "./llm_client.js";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+import { DEFAULT_MODEL } from "./constants.js";
 
 const RULE_REFINEMENT_PROMPT = `You are converting observed knowledge gaps into precise AGENTS.md rules.
 
