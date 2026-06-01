@@ -220,7 +220,16 @@ export class AgentRunner {
         "--verbose",
         "--dangerously-skip-permissions",
       ];
-      if (this.noContextFiles) args.push("--bare");
+      if (this.noContextFiles) {
+        args.push("--bare");
+        // Block the obvious bypass: even with on-disk docs hidden, the agent
+        // can run `git show HEAD:AGENTS.md` and pull the real content from
+        // git history. Deny git via the Bash tool. Pass exactly ONE pattern —
+        // passing multiple patterns as separate args confuses the variadic
+        // parser and ends up denying way more than intended.
+        // Pattern syntax: "Bash(<cmd> *)" matches that command + any args.
+        args.push("--disallowedTools", "Bash(git *)");
+      }
 
       // Map our model to claude's format
       const [provider, modelId] = this.model.split("/");

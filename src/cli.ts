@@ -11,6 +11,7 @@ import { testFreshAgent } from "./test_agent.js";
 import { initState, loadState, saveState, hasPlateaued } from "./state.js";
 import type { TunerState, IterationResult, KeptRuleEntry } from "./state.js";
 import type { RepoInfo } from "./types.js";
+import { auditExistingRules, summarizeAudit, writeAuditReport } from "./audit_rules.js";
 
 program
   .name("agent-tuner")
@@ -24,6 +25,8 @@ program
   .option("--merge", "Merge with existing AGENTS.md")
   .option("-b, --base-url <url>", "Custom OpenAI-compatible API base URL")
   .option("--backend <type>", "Agent backend for the fresh-test agent: 'pi' or 'claude'", "pi")
+  .option("--audit-existing", "Probe each rule in the existing AGENTS.md to flag redundant ones")
+  .option("--audit-only", "Run only the existing-rule audit; skip the new-rule loop")
   .option("-v, --verbose", "Show details")
 
   .option("--resume", "Resume from saved state")
@@ -68,6 +71,29 @@ program
     } else {
       clearCaches();
       state = initState(path, parseInt(opts.iterations, 10));
+    }
+
+    // ─── Existing-rule audit (optional, runs before the loop) ───
+    if (opts.auditExisting || opts.auditOnly) {
+      // Need depth-1 discovery for the test agent's context
+      const { info, depthAnalysis } = discoverAtDepth(path, 1, state);
+      try {
+        const audited = await auditExistingRules(info, depthAnalysis, state, opts.model, opts.baseUrl, opts.backend);
+        if (audited.length === 0) {
+          console.log("ℹ️  No existing AGENTS.md rules found to audit.");
+        } else {
+          console.log(summarizeAudit(audited));
+          const reportPath = writeAuditReport(path, audited);
+          console.log(`📝 Audit report: ${reportPath}`);
+        }
+      } catch (e: any) {
+        console.error(`❌ Audit failed: ${e.message}`);
+        if (opts.auditOnly) process.exit(1);
+        console.error("   Continuing with normal loop…");
+      }
+      if (opts.auditOnly) {
+        process.exit(0);
+      }
     }
 
     // ─── Loop mode ───
