@@ -198,6 +198,13 @@ export class AgentRunner {
   private runViaClaude(prompt: string): Promise<RunnerResult> {
     return new Promise((resolve) => {
       // -p: non-interactive print mode (claude CLI requires this for stdin prompts)
+      // --output-format stream-json + --verbose: emit NDJSON events for
+      //         assistant messages, tool_use blocks, tool_result blocks, and
+      //         the final result. This is the only reliable way to recover
+      //         tool calls — the prior regex over plain text was matching
+      //         "(read|bash|grep|find|ls)\s+", but claude's real tool names
+      //         are "Bash" / "Read" / "Edit" (PascalCase) and the default
+      //         text format doesn't print them in a parseable way at all.
       // --bare: skip hooks, LSP, plugin sync, auto-memory, CLAUDE.md auto-discovery
       //         (this is how we starve the fresh agent of AGENTS.md / CLAUDE.md context)
       // --dangerously-skip-permissions: required for tool use in -p mode. Without
@@ -207,7 +214,12 @@ export class AgentRunner {
       //         to use tools, so we MUST grant them.
       // Note: there is no `--no-continue` flag — continuation is opt-in via `-c`,
       // so omitting `-c` is sufficient.
-      const args: string[] = ["-p", "--dangerously-skip-permissions"];
+      const args: string[] = [
+        "-p",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+      ];
       if (this.noContextFiles) args.push("--bare");
 
       // Map our model to claude's format
@@ -237,22 +249,70 @@ export class AgentRunner {
       });
 
       proc.on("close", (code) => {
-        // Parse tool calls from claude output (it prints tool usage)
-        const lines = stdout.split("\n");
-        for (const line of lines) {
-          const toolMatch = line.match(/^(read|bash|grep|find|ls)\s+(.*)/);
-          if (toolMatch) {
-            toolCalls.push({ name: toolMatch[1], args: { command: toolMatch[2] }, result: "" });
+        // Parse stream-json NDJSON events. Each line is a JSON object with
+        // {type, ...}. Pull tool_use blocks from "assistant" events, match
+        // them to tool_result blocks in following "user" events, take final
+        // text from the terminal "result" event.
+        const pendingToolIds = new Map<string, number>(); // tool_use_id -> toolCalls index
+        let finalText = "";
+        let lastAssistantText = "";
+        let claudeError: string | undefined;
+
+        for (const rawLine of stdout.split("\n")) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          let event: any;
+          try { event = JSON.parse(line); } catch { continue; }
+
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block?.type === "tool_use" && typeof block.id === "string") {
+                const idx = toolCalls.length;
+                toolCalls.push({ name: block.name, args: block.input, result: "" });
+                pendingToolIds.set(block.id, idx);
+              }
+              if (block?.type === "text" && typeof block.text === "string") {
+                lastAssistantText = block.text;
+              }
+            }
+          }
+
+          if (event.type === "user" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block?.type === "tool_result" && typeof block.tool_use_id === "string") {
+                const idx = pendingToolIds.get(block.tool_use_id);
+                if (idx !== undefined) {
+                  let resultText = "";
+                  if (typeof block.content === "string") {
+                    resultText = block.content;
+                  } else if (Array.isArray(block.content)) {
+                    for (const c of block.content) {
+                      if (c?.type === "text" && typeof c.text === "string") resultText += c.text;
+                    }
+                  }
+                  toolCalls[idx].result = resultText;
+                  pendingToolIds.delete(block.tool_use_id);
+                }
+              }
+            }
+          }
+
+          if (event.type === "result") {
+            if (event.is_error && typeof event.result === "string") {
+              claudeError = event.result;
+            } else if (typeof event.result === "string") {
+              finalText = event.result;
+            }
           }
         }
 
-        // Clean up the output — remove claude's decorative chars
-        let text = stdout
-          .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "") // strip ANSI
-          .replace(/^[\s❯▶▸►→·•-]+/gm, "") // strip bullet chars
-          .trim();
+        // Prefer the terminal "result" event's text; fall back to the last
+        // assistant text block if the result event was missing or empty.
+        const text = (finalText || lastAssistantText).trim();
 
-        if (code !== 0 && !text) {
+        if (claudeError) {
+          resolve({ text, toolCalls, error: claudeError });
+        } else if (code !== 0 && !text) {
           resolve({ text: "", toolCalls, error: `claude exited with code ${code}: ${stderr.trim()}` });
         } else {
           resolve({ text, toolCalls });

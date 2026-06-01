@@ -1,7 +1,7 @@
 import type { RepoInfo, DepthAnalysis, Rule } from "./types.js";
 import type { TunerState } from "./state.js";
 import { infoToContext } from "./context_builder.js";
-import { createLLMClient, callLLM, parseJSONResponse } from "./llm_client.js";
+import { createLLMClient, callLLMStructured } from "./llm_client.js";
 
 import { DEFAULT_MODEL } from "./constants.js";
 
@@ -45,13 +45,43 @@ export async function generateRulesFromGaps(
     .replace("{context}", context)
     .replace("{gaps}", gapsText);
 
+  const schema = {
+    type: "object" as const,
+    properties: {
+      rules: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            category: {
+              type: "string",
+              enum: ["setup", "testing", "conventions", "architecture", "error_handling", "configuration", "git", "ci", "deployment", "gotchas", "general"],
+            },
+            content: { type: "string" },
+            confidence: { type: "number", minimum: 0, maximum: 1 },
+          },
+          required: ["category", "content", "confidence"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["rules"],
+    additionalProperties: false,
+  };
+
   try {
     const llm = createLLMClient({ model, baseUrl });
-    const text = await callLLM(llm, prompt, 0.3, 3000);
+    const wrapped = await callLLMStructured<{ rules: Array<{ category: string; content: string; confidence: number }> }>(
+      llm,
+      prompt,
+      schema,
+      "submit_rules",
+      "Submit the rules generated from observed knowledge gaps.",
+    );
 
-    const parsed = parseJSONResponse<Array<{ category: string; content: string; confidence: number }>>(text, []);
+    const parsed = wrapped?.rules || [];
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      if (process.env.DEBUG) console.warn("⚠️  LLM rule refinement returned invalid JSON, falling back to deterministic generation");
+      if (process.env.DEBUG) console.warn("⚠️  LLM rule refinement returned no rules, falling back to deterministic generation");
       return fallbackGenerateRules(gaps, info);
     }
 

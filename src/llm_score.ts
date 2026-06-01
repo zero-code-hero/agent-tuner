@@ -1,7 +1,7 @@
 import type { RepoInfo, DepthAnalysis, Rule, ScoredRule, KeptRule } from "./types.js";
 import type { TunerState } from "./state.js";
 import { infoToContext } from "./context_builder.js";
-import { createLLMClient, callLLM, parseJSONResponse } from "./llm_client.js";
+import { createLLMClient, callLLMStructured } from "./llm_client.js";
 
 import { DEFAULT_MODEL } from "./constants.js";
 
@@ -72,17 +72,44 @@ export async function scoreRules(
 
   const prompt = SCORE_PROMPT.replace("{context}", context).replace("{rules}", rulesText);
 
+  const schema = {
+    type: "object" as const,
+    properties: {
+      scores: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            index: { type: "integer", minimum: 0 },
+            score: { type: "integer", minimum: 1, maximum: 10 },
+            keep: { type: "boolean" },
+            reason: { type: "string" },
+            suggestion: { type: "string", description: "Optional improved rule text" },
+          },
+          required: ["index", "score", "keep", "reason"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["scores"],
+    additionalProperties: false,
+  };
+
   try {
     const llm = createLLMClient({ model, baseUrl });
-    const text = await withRetry(
-      () => callLLM(llm, prompt, 0.1, 4000),
+    const wrapped = await withRetry(
+      () => callLLMStructured<{ scores: Array<{ index: number; score: number; keep: boolean; reason: string; suggestion?: string }> }>(
+        llm,
+        prompt,
+        schema,
+        "submit_scores",
+        "Submit a score (1-10) and keep/discard decision for each candidate rule.",
+      ),
       2,
       "LLM scoring",
     );
 
-    const results = parseJSONResponse<Array<{
-      index: number; score: number; keep: boolean; reason: string; suggestion?: string;
-    }>>(text, []);
+    const results = wrapped?.scores || [];
 
     if (!Array.isArray(results)) {
       throw new Error("Scoring returned invalid JSON");

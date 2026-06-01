@@ -158,6 +158,90 @@ export async function callLLM(
   return cleanResponse(text);
 }
 
+// ─── Structured output ───
+// Force the model to return a JSON object matching a schema. For Anthropic
+// we use the tool-forced output pattern (define a single tool, force it via
+// tool_choice). For OpenAI-compatible providers we use response_format with
+// json_schema where supported, falling back to plain JSON-mode parsing.
+//
+// This is the right fix for newer Anthropic models (opus-4-8+, sonnet-4-6+)
+// that habitually narrate their work instead of producing JSON, even when
+// the prompt says "JSON ONLY". Tool-forced output is a hard constraint, not
+// a polite request — the model literally cannot return anything else.
+
+export interface JsonSchema {
+  type: "object";
+  properties: Record<string, any>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+export async function callLLMStructured<T = any>(
+  llm: LLMClient,
+  prompt: string,
+  schema: JsonSchema,
+  toolName: string = "respond",
+  toolDescription: string = "Return the response in the required structured format.",
+  maxTokens: number = 8192,
+): Promise<T> {
+  // Anthropic: tool-forced JSON output
+  if (llm.anthropicClient) {
+    const resp = await llm.anthropicClient.messages.create({
+      model: llm.model,
+      max_tokens: maxTokens,
+      tools: [{
+        name: toolName,
+        description: toolDescription,
+        input_schema: schema as any,
+      }],
+      tool_choice: { type: "tool", name: toolName },
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    for (const block of resp.content) {
+      if (block.type === "tool_use" && block.name === toolName) {
+        return block.input as T;
+      }
+    }
+    throw new Error(`Anthropic returned no tool_use block for ${toolName}`);
+  }
+
+  // OpenAI-compatible: response_format with json_schema (supported by gpt-4o,
+  // gpt-4o-mini, and most modern OpenAI-compatible servers). If the server
+  // rejects it we fall through to a plain JSON-mode call and parse text.
+  if (!llm.openaiClient) {
+    throw new Error(`No client available for provider ${llm.provider}`);
+  }
+
+  try {
+    const resp = await llm.openaiClient.chat.completions.create({
+      model: llm.model,
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: maxTokens,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: toolName,
+          schema: schema as any,
+          strict: true,
+        },
+      } as any,
+    });
+    const text = resp.choices[0]?.message?.content?.trim() || "";
+    return JSON.parse(text) as T;
+  } catch (e: any) {
+    // Fallback: ask for JSON object via response_format and parse loosely
+    const resp = await llm.openaiClient.chat.completions.create({
+      model: llm.model,
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: maxTokens,
+      response_format: { type: "json_object" } as any,
+    });
+    const text = resp.choices[0]?.message?.content?.trim() || "";
+    return JSON.parse(text) as T;
+  }
+}
+
 // ─── Response cleaning ───
 // Try to return clean text without aggressively stripping content.
 // Only extract from fences when the outer text won't parse as-is.
