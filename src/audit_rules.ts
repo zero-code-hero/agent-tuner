@@ -36,7 +36,7 @@ export interface ExistingRule {
   questionId: string;        // generated id used to link probe → verdict
 }
 
-export type RuleVerdict = "essential" | "redundant" | "uncertain";
+export type RuleVerdict = "essential" | "redundant" | "partial-coverage" | "uncertain";
 
 export interface AuditedRule {
   rule: ExistingRule;
@@ -44,6 +44,8 @@ export interface AuditedRule {
   probeQuestion: string;
   probeResult?: QuestionResult;
   reason: string;
+  // For partial-coverage verdicts: what the agent's answer didn't capture.
+  missingFromAnswer?: string;
 }
 
 // ─── Parsing ───
@@ -182,6 +184,90 @@ export async function generateProbes(
   return rules.map((r) => probesByRule.get(r.questionId) || `Explain the convention: ${r.content}`);
 }
 
+// ─── Nuance judge ───
+//
+// For each rule that the fresh agent answered confidently (would-be-redundant),
+// ask an LLM whether the agent's answer FULLY captures the rule's content +
+// nuance. If something is missing (a caveat, a specific identifier, a "do this
+// even though"-style exception), downgrade redundant → partial-coverage.
+//
+// Without this check, two rules paraphrased differently on the same topic
+// would each get marked redundant because the agent finds the basic info
+// elsewhere — losing the rule's unique nuance if the user prunes.
+
+const NUANCE_PROMPT = `You are judging whether an AI agent's answer fully captures the content of a rule from an AGENTS.md file.
+
+The rule:
+"""
+{rule}
+"""
+
+The probing question asked:
+"""
+{question}
+"""
+
+The agent's answer (the agent did NOT have access to AGENTS.md):
+"""
+{answer}
+"""
+
+Compare the rule against the answer. Does the answer cover:
+- The same key facts the rule states?
+- Any specific identifiers, file paths, commands, or terms?
+- Any caveats, exceptions, "unless", "even though", "but never" constraints?
+- The same actionable instruction?
+
+If the answer captures everything the rule teaches, return covered: true.
+If the answer misses anything meaningful (a caveat, a specific name, an
+exception, a "do this in case X" specifier), return covered: false and
+describe what's missing in one short sentence.
+
+Be strict — better to flag partial coverage than miss a nuance.`;
+
+async function judgeNuance(
+  rule: string,
+  question: string,
+  answer: string,
+  model: string,
+  baseUrl: string | undefined,
+): Promise<{ covered: boolean; missing?: string }> {
+  const schema = {
+    type: "object" as const,
+    properties: {
+      covered: { type: "boolean" },
+      missing: { type: "string", description: "What the answer didn't capture (empty when covered=true)" },
+    },
+    required: ["covered", "missing"],
+    additionalProperties: false,
+  };
+
+  try {
+    const llm = createLLMClient({ model, baseUrl });
+    const prompt = NUANCE_PROMPT
+      .replace("{rule}", rule)
+      .replace("{question}", question)
+      .replace("{answer}", answer);
+    const result = await callLLMStructured<{ covered: boolean; missing: string }>(
+      llm,
+      prompt,
+      schema,
+      "submit_nuance_judgment",
+      "Submit a strict nuance-coverage verdict.",
+      1024,
+    );
+    return {
+      covered: Boolean(result?.covered),
+      missing: result?.missing && result.missing.trim() !== "" ? result.missing : undefined,
+    };
+  } catch (e: any) {
+    // On judge failure, fall back to conservative "not covered" so we
+    // err on keeping the rule rather than losing nuance.
+    if (process.env.DEBUG) console.warn(`⚠️  Nuance judge failed: ${e.message}. Defaulting to partial-coverage.`);
+    return { covered: false, missing: `nuance judge errored (${e.message})` };
+  }
+}
+
 // ─── Audit ───
 
 export async function auditExistingRules(
@@ -213,35 +299,84 @@ export async function auditExistingRules(
   // Run the fresh agent on those questions (docs hidden by testFreshAgent)
   const results = await testFreshAgent(info, depthAnalysis, state, questions, model, baseUrl, backend);
 
-  // Classify each rule
-  const audited: AuditedRule[] = rules.map((rule, i) => {
+  // First pass: tentatively classify each rule based only on the agent's
+  // self-reported confidence + docsNeeded.
+  type PendingRule = {
+    rule: ExistingRule;
+    result?: QuestionResult;
+    probe: string;
+    tentative: RuleVerdict;
+  };
+  const pending: PendingRule[] = rules.map((rule, i) => {
     const result = results.find((r) => r.questionId === rule.questionId);
     const probe = probeQuestions[i];
     if (!result) {
-      return {
-        rule,
-        verdict: "uncertain" as RuleVerdict,
-        probeQuestion: probe,
-        reason: "no probe result returned",
-      };
-    }
-    // The test_agent already applies the same gap criterion as the main loop:
-    //   answered === true means confidence >= 0.75 AND no docsNeeded.
-    if (result.answered) {
-      return {
-        rule,
-        verdict: "redundant",
-        probeQuestion: probe,
-        probeResult: result,
-        reason: `fresh agent answered without the rule (confidence ${result.confidence.toFixed(2)})`,
-      };
+      return { rule, probe, tentative: "uncertain" };
     }
     return {
       rule,
-      verdict: "essential",
-      probeQuestion: probe,
-      probeResult: result,
-      reason: result.failureReason || `fresh agent could not answer (confidence ${result.confidence.toFixed(2)})`,
+      result,
+      probe,
+      tentative: result.answered ? "redundant" : "essential",
+    };
+  });
+
+  // Second pass: nuance-judge every would-be-redundant rule. Compare the
+  // rule's full content against the agent's actual answer; downgrade to
+  // partial-coverage when the answer misses anything meaningful.
+  //
+  // Batched in parallel — judging is ~1 API call per redundant rule, and
+  // running 30+ sequentially would dominate the wall-clock. Modest cap on
+  // concurrency to avoid hammering rate limits.
+  const wouldBeRedundant = pending.filter((p) => p.tentative === "redundant" && p.result?.answer);
+  if (wouldBeRedundant.length > 0) {
+    console.log(`🧐 Nuance-judging ${wouldBeRedundant.length} would-be-redundant rule(s)...`);
+  }
+  const CONCURRENCY = 6;
+  const nuanceVerdicts = new Map<string, { covered: boolean; missing?: string }>();
+  for (let i = 0; i < wouldBeRedundant.length; i += CONCURRENCY) {
+    const batch = wouldBeRedundant.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((p) =>
+        judgeNuance(p.rule.content, p.probe, p.result!.answer!, model, baseUrl)
+          .then((v) => ({ id: p.rule.questionId, v }))
+      ),
+    );
+    for (const { id, v } of results) nuanceVerdicts.set(id, v);
+  }
+
+  // Final pass: emit AuditedRule with adjusted verdict.
+  const audited: AuditedRule[] = pending.map((p) => {
+    if (p.tentative === "uncertain") {
+      return { rule: p.rule, verdict: "uncertain", probeQuestion: p.probe, reason: "no probe result returned" };
+    }
+    if (p.tentative === "essential") {
+      return {
+        rule: p.rule,
+        verdict: "essential",
+        probeQuestion: p.probe,
+        probeResult: p.result,
+        reason: p.result!.failureReason || `fresh agent could not answer (confidence ${p.result!.confidence.toFixed(2)})`,
+      };
+    }
+    // Tentative redundant — consult nuance judge.
+    const nuance = nuanceVerdicts.get(p.rule.questionId);
+    if (!nuance || nuance.covered) {
+      return {
+        rule: p.rule,
+        verdict: "redundant",
+        probeQuestion: p.probe,
+        probeResult: p.result,
+        reason: `fresh agent answered without the rule (confidence ${p.result!.confidence.toFixed(2)})`,
+      };
+    }
+    return {
+      rule: p.rule,
+      verdict: "partial-coverage",
+      probeQuestion: p.probe,
+      probeResult: p.result,
+      reason: `agent's answer didn't fully capture the rule's content`,
+      missingFromAnswer: nuance.missing,
     };
   });
 
@@ -254,13 +389,14 @@ export function summarizeAudit(audited: AuditedRule[]): string {
   if (audited.length === 0) return "";
 
   const essential = audited.filter((a) => a.verdict === "essential");
+  const partial = audited.filter((a) => a.verdict === "partial-coverage");
   const redundant = audited.filter((a) => a.verdict === "redundant");
   const uncertain = audited.filter((a) => a.verdict === "uncertain");
 
   const lines: string[] = [];
   lines.push("");
   lines.push("─".repeat(70));
-  lines.push(`  Existing-rule audit: ${essential.length} essential, ${redundant.length} likely redundant, ${uncertain.length} uncertain`);
+  lines.push(`  Existing-rule audit: ${essential.length} essential, ${partial.length} partial-coverage, ${redundant.length} likely redundant, ${uncertain.length} uncertain`);
   lines.push("─".repeat(70));
 
   if (essential.length > 0) {
@@ -271,9 +407,18 @@ export function summarizeAudit(audited: AuditedRule[]): string {
     }
   }
 
+  if (partial.length > 0) {
+    lines.push("");
+    lines.push("⚠️  Partial coverage (keep or rephrase — agent answered the gist but missed nuance):");
+    for (const a of partial) {
+      lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
+      if (a.missingFromAnswer) lines.push(`      → missing: ${a.missingFromAnswer}`);
+    }
+  }
+
   if (redundant.length > 0) {
     lines.push("");
-    lines.push("🔶 Likely redundant (review — fresh agent answered without them):");
+    lines.push("🔶 Likely redundant (review — fresh agent answered fully without them):");
     for (const a of redundant) {
       lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
       lines.push(`      → ${a.reason}`);
@@ -303,6 +448,7 @@ export function writeAuditReport(repoPath: string, audited: AuditedRule[]): stri
       content: a.rule.content,
       verdict: a.verdict,
       reason: a.reason,
+      missingFromAnswer: a.missingFromAnswer,
       probeQuestion: a.probeQuestion,
       probeAnswer: a.probeResult?.answer,
       probeConfidence: a.probeResult?.confidence,
