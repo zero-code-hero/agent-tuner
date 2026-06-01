@@ -21,10 +21,30 @@ import { tryParseJsonArray } from "./json_parse.js";
 // those describe what the code is, not how to work in this codebase, and a
 // fresh agent should be able to use them. The line we're drawing is "docs
 // targeted at AI agents".
-const HIDDEN_ROOT_DOCS = ["AGENTS.md", "CLAUDE.md", "agents.md", "claude.md"];
-// Agent-targeted doc directories. .swm is Swimm's per-repo doc store —
-// agents discover it via `ls -la` and read whole docs from it.
-const HIDDEN_DOC_DIRS = [".claude", ".cursor", ".swm", "docs/agents"];
+// AI-rules files: any file whose ENTIRE PURPOSE is to instruct AI agents.
+// These tend to be near-duplicates of each other across tools (Cursor mirrors
+// AGENTS.md, Windsurf mirrors that, etc.). They're what we're AUDITING, so
+// they all need to be hidden together — otherwise the audit just measures
+// "is this rule duplicated in another agent-rules file" and marks everything
+// redundant trivially.
+const HIDDEN_ROOT_DOCS = [
+  "AGENTS.md", "CLAUDE.md", "agents.md", "claude.md",
+  ".windsurfrules", ".clinerules", ".roomodes",
+  ".aider.conf.yml", ".continuerc",
+];
+// Whole directories that are AI-rules stores (not just any markdown).
+// .claude/ is INTENTIONALLY EXCLUDED — its skills/runbooks/agents are the
+// actual workflow docs the working agent uses, and rules duplicating them
+// can legitimately be considered redundant.
+// .swm/ is Swimm — also a working doc store, intentionally excluded.
+const HIDDEN_DOC_DIRS = [
+  ".cursor",          // .cursor/rules/rules.mdc is literal "AGENTS.md for Cursor"
+  ".github/copilot",  // Copilot instruction files
+];
+// Specific Copilot instruction file lives under .github/
+const HIDDEN_SPECIFIC_PATHS = [
+  ".github/copilot-instructions.md",
+];
 // Also hide nested AGENTS.md / CLAUDE.md anywhere in the tree (e.g.
 // msfrontend/AGENTS.md). Bounded by MAX_TREE_DEPTH so we don't walk
 // node_modules etc.
@@ -54,16 +74,15 @@ interface StashState {
 
 function isHidableDocFile(name: string): boolean {
   const lower = name.toLowerCase();
-  // Markdown is the obvious case. YAML is required too because skills under
-  // .claude/skills/*/*.yaml define agent-targeted conventions (triggers,
-  // enforced rules, terminology). YAML/YML at this depth IS docs in disguise.
+  // Within an AI-rules directory (e.g. .cursor/), grab markdown variants:
+  //   .md   - generic
+  //   .mdc  - Cursor's "markdown with config frontmatter"
+  //   .yaml/.yml - rare but used by some tools
   return (
     lower.endsWith(".md") ||
+    lower.endsWith(".mdc") ||
     lower.endsWith(".yaml") ||
-    lower.endsWith(".yml") ||
-    lower === "skill.md" ||
-    lower === "agents.md" ||
-    lower === "claude.md"
+    lower.endsWith(".yml")
   );
 }
 
@@ -205,8 +224,18 @@ function removeWorktree(wt: Worktree): void {
 function sanitizeWorktree(worktreePath: string): number {
   let count = 0;
   const candidates = new Set<string>();
-  // Only the AGENTS.md/CLAUDE.md family — we're auditing those, not all docs.
+  // AI-rules files at the repo root
   for (const name of HIDDEN_ROOT_DOCS) candidates.add(join(worktreePath, name));
+  // Known specific paths (e.g. .github/copilot-instructions.md)
+  for (const rel of HIDDEN_SPECIFIC_PATHS) candidates.add(join(worktreePath, rel));
+  // AI-rules directories — recursively collect all files within
+  for (const docDir of HIDDEN_DOC_DIRS) {
+    const dirPath = join(worktreePath, docDir);
+    if (existsSync(dirPath)) {
+      for (const f of collectDocFiles(dirPath)) candidates.add(f);
+    }
+  }
+  // Nested AGENTS.md / CLAUDE.md anywhere in the tree
   for (const f of collectNestedAgentDocs(worktreePath)) candidates.add(f);
 
   for (const path of candidates) {
