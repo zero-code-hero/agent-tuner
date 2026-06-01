@@ -92,7 +92,7 @@ export function hasPlateaued(state: TunerState, threshold: number = 0.5): boolea
   const effectiveThreshold = Math.max(threshold, state.totalScore * 0.05);
   if (delta < effectiveThreshold) {
     state.plateauCount++;
-    return state.plateauCount >= 2;
+    return state.plateauCount >= 10;
   }
   state.plateauCount = 0;
   return false;

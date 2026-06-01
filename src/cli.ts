@@ -19,7 +19,7 @@ program
   .option("-o, --output <path>", "Output file path", "AGENTS.md")
   .option("-m, --model <model>", "LLM model", DEFAULT_MODEL)
   .option("-t, --threshold <n>", "Minimum score to keep a rule (1-10)", "6")
-  .option("-n, --iterations <n>", "Max iterations", "5")
+  .option("-n, --iterations <n>", "Max iterations", "20")
   .option("--dry-run", "Print output without writing file")
   .option("--merge", "Merge with existing AGENTS.md")
   .option("-b, --base-url <url>", "Custom OpenAI-compatible API base URL")
@@ -75,7 +75,7 @@ program
 
     for (let iter = state.currentIteration; iter < maxIterations; iter++) {
       state.currentIteration = iter;
-      state.currentDepth = Math.min(iter + 1, 4);
+      state.currentDepth = iter + 1;
 
       console.log(`\n${"═".repeat(50)}`);
       console.log(`  Iteration ${iter + 1} (depth ${state.currentDepth})`);
@@ -166,7 +166,7 @@ program
       saveState(path, state);
 
       // Check plateau
-      if (hasPlateaued(state, 1)) {
+      if (hasPlateaued(state, 0.02)) {
         console.log(`\n⚡ Score plateaued. Stopping.`);
         break;
       }

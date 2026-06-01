@@ -16,13 +16,9 @@ Your task: answer these questions by exploring the codebase. Use your tools.
 - Use grep/find to locate relevant code
 - Be honest about what you can and cannot find
 
-For each question, respond with a JSON object. Return ONLY a JSON array, no markdown, no explanation:
+CRITICAL: Return a COMPLETE valid JSON array as your ONLY output. No explanation. No markdown. Just raw JSON.
 
-[
-  {{"questionId": "q1", "answered": true, "answer": "the answer", "confidence": 0.9, "evidence": ["file1.ts", "package.json"], "docsNeeded": null}},
-  {{"questionId": "q2", "answered": false, "answer": null, "confidence": 0.2, "evidence": [], "failureReason": "couldn't find X", "docsNeeded": "AGENTS.md should say: ..."}},
-  ...
-]
+[{"questionId":"iter0_q0","answered":true,"answer":"answer text","confidence":0.9,"evidence":["file1.ts"],"docsNeeded":null},{"questionId":"iter0_q1","answered":false,"answer":null,"confidence":0.2,"evidence":[],"failureReason":"couldn't find X","docsNeeded":"..."}]
 
 Questions:
 {questions}
@@ -56,7 +52,7 @@ export async function testFreshAgent(
       model,
       thinkingLevel: "off",
       noContextFiles: true, // CRITICAL: strip AGENTS.md / CLAUDE.md
-      maxTurns: 30,
+      maxTurns: 50,
       baseUrl,
     });
 

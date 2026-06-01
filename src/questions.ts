@@ -1,7 +1,7 @@
 import type { RepoInfo, DepthAnalysis } from "./types.js";
 import type { TunerState, Question } from "./state.js";
 import { infoToContext } from "./context_builder.js";
-import { AgentRunner } from "./agent_runner.js";
+import { createLLMClient, callLLM } from "./llm_client.js";
 import { tryParseJsonArray } from "./json_parse.js";
 
 import { DEFAULT_MODEL } from "./constants.js";
@@ -73,26 +73,10 @@ export async function generateQuestions(
   let lastError: unknown;
   const maxRetries = 2;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const runner = new AgentRunner({
-      cwd: info.path,
-      model,
-      thinkingLevel: "off",
-      noContextFiles: false, // generator can see existing docs
-      maxTurns: 20,
-      baseUrl,
-    });
+    const llm = createLLMClient({ model, baseUrl });
+    const result = await callLLM(llm, prompt);
 
-    const result = await runner.run(prompt);
-    if (result.error && !result.text) {
-      lastError = new Error(`Question generation failed: ${result.error}`);
-      if (attempt < maxRetries) {
-        if (process.env.DEBUG) console.warn(`⚠️  Question generation attempt ${attempt + 1} failed (${result.error}), retrying...`);
-        continue;
-      }
-      throw lastError;
-    }
-
-    const parsed = tryParseJsonArray(result.text);
+    const parsed = tryParseJsonArray(result);
     if (!parsed || !Array.isArray(parsed)) {
       lastError = new Error("Question generator returned non-JSON");
       if (attempt < maxRetries) {

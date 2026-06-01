@@ -58,7 +58,7 @@ export class AgentRunner {
   private async runViaPi(prompt: string): Promise<RunnerResult> {
     // Resolve the model through the typed ModelRegistry — no internal API hacks
     const authStorage = AuthStorage.inMemory();
-    const modelRegistry = ModelRegistry.inMemory(authStorage);
+    const modelRegistry = ModelRegistry.create(authStorage);
     const [provider, modelId] = this.model.split("/");
     const model = modelRegistry.find(provider, modelId);
     if (!model) {
@@ -177,12 +177,18 @@ export class AgentRunner {
         break;
       }
       if (Array.isArray(m.content)) {
-        // SDK content blocks are a union (TextContent | ThinkingContent | ToolCall).
-        // Only TextContent has a .text field. Check the type tag safely.
-        const textBlock = m.content.find((b: any) => b.type === "text" && typeof b.text === "string");
-        if (textBlock) { text = (textBlock as any).text; break; }
+        // Collect ALL text blocks, including reasoning/thinking content
+        // that might contain the answer
+        const allTexts: string[] = [];
+        for (const b of m.content) {
+          if (b.type === "text" && typeof b.text === "string") allTexts.push(b.text);
+          // Also try reasoning/thinking blocks for text content
+          if (b.type === "reasoning" && typeof b.reasoning === "string") allTexts.push(b.reasoning);
+          if (b.type === "thinking" && typeof b.thinking === "string") allTexts.push(b.thinking);
+        }
+        text = allTexts.join("\n\n").trim();
+        if (text) break;
       }
-      if (text) break;
     }
 
     return { text, toolCalls, error: promptError };
