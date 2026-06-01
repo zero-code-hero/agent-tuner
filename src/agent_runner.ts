@@ -177,13 +177,12 @@ export class AgentRunner {
         break;
       }
       if (Array.isArray(m.content)) {
-        // Collect ALL text blocks, including reasoning/thinking content
-        // that might contain the answer
+        // Collect text and thinking blocks. The Pi SDK content union is
+        // "text" | "thinking" | "toolCall" — there is no "reasoning" type,
+        // so we don't check for it.
         const allTexts: string[] = [];
         for (const b of m.content) {
           if (b.type === "text" && typeof b.text === "string") allTexts.push(b.text);
-          // Also try reasoning/thinking blocks for text content
-          if (b.type === "reasoning" && typeof b.reasoning === "string") allTexts.push(b.reasoning);
           if (b.type === "thinking" && typeof b.thinking === "string") allTexts.push(b.thinking);
         }
         text = allTexts.join("\n\n").trim();
@@ -198,8 +197,18 @@ export class AgentRunner {
 
   private runViaClaude(prompt: string): Promise<RunnerResult> {
     return new Promise((resolve) => {
-      const args: string[] = ["-p", "--no-continue"];
-      if (this.noContextFiles) args.push("--no-context-files");
+      // -p: non-interactive print mode (claude CLI requires this for stdin prompts)
+      // --bare: skip hooks, LSP, plugin sync, auto-memory, CLAUDE.md auto-discovery
+      //         (this is how we starve the fresh agent of AGENTS.md / CLAUDE.md context)
+      // --dangerously-skip-permissions: required for tool use in -p mode. Without
+      //         this the agent has no tools, so the "fresh agent explores the
+      //         codebase" premise collapses into hallucinated answers from training
+      //         data + the prompt. The test-agent prompt explicitly tells the agent
+      //         to use tools, so we MUST grant them.
+      // Note: there is no `--no-continue` flag — continuation is opt-in via `-c`,
+      // so omitting `-c` is sufficient.
+      const args: string[] = ["-p", "--dangerously-skip-permissions"];
+      if (this.noContextFiles) args.push("--bare");
 
       // Map our model to claude's format
       const [provider, modelId] = this.model.split("/");

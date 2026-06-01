@@ -1,7 +1,7 @@
 import type { RepoInfo, DepthAnalysis } from "./types.js";
 import type { TunerState, Question, QuestionResult } from "./state.js";
 import { freshAgentContext } from "./context_builder.js";
-import { AgentRunner } from "./agent_runner.js";
+import { AgentRunner, type RunnerBackend } from "./agent_runner.js";
 import { tryParseJsonArray } from "./json_parse.js";
 
 import { DEFAULT_MODEL } from "./constants.js";
@@ -33,6 +33,7 @@ export async function testFreshAgent(
   questions: Question[],
   model: string = DEFAULT_MODEL,
   baseUrl?: string,
+  backend: RunnerBackend = "pi",
 ): Promise<QuestionResult[]> {
   const freshContext = freshAgentContext(info);
 
@@ -54,6 +55,7 @@ export async function testFreshAgent(
       noContextFiles: true, // CRITICAL: strip AGENTS.md / CLAUDE.md
       maxTurns: 50,
       baseUrl,
+      backend,
     });
 
     const result = await runner.run(prompt);

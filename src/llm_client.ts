@@ -39,7 +39,10 @@ function resolveBaseUrl(provider: Provider, explicitBaseUrl?: string): string | 
   if (explicitBaseUrl) return explicitBaseUrl;
   switch (provider) {
     case "anthropic":
-      return "https://api.anthropic.com/v1";
+      // Anthropic SDK appends `/v1/messages` itself — must NOT include `/v1` here,
+      // else requests go to `/v1/v1/messages` → 404. Return undefined to use the
+      // SDK's default (`https://api.anthropic.com`).
+      return undefined;
     case "google":
       return "https://generativelanguage.googleapis.com/v1beta/openai";
     case "openai":
@@ -114,13 +117,19 @@ export async function callLLM(
 ): Promise<string> {
   // Anthropic: native SDK call
   if (llm.anthropicClient) {
-    const resp = await llm.anthropicClient.messages.create({
+    // Newer Anthropic models (opus-4-8+) deprecate `temperature` and reject
+    // it outright. Older models still accept it. Detect by model id pattern
+    // and only pass it when supported.
+    const supportsTemperature = !/^claude-(opus|sonnet|haiku)-4-([89]|\d{2,})/.test(llm.model);
+
+    const req: any = {
       model: llm.model,
       max_tokens: maxTokens,
-      temperature,
-      system: "",
       messages: [{ role: "user", content: prompt }],
-    });
+    };
+    if (supportsTemperature) req.temperature = temperature;
+
+    const resp = await llm.anthropicClient.messages.create(req);
 
     let text = "";
     for (const block of resp.content) {

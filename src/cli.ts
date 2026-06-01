@@ -23,6 +23,7 @@ program
   .option("--dry-run", "Print output without writing file")
   .option("--merge", "Merge with existing AGENTS.md")
   .option("-b, --base-url <url>", "Custom OpenAI-compatible API base URL")
+  .option("--backend <type>", "Agent backend for the fresh-test agent: 'pi' or 'claude'", "pi")
   .option("-v, --verbose", "Show details")
 
   .option("--resume", "Resume from saved state")
@@ -103,7 +104,7 @@ program
 
       // Step 2: Fresh agent tries to answer
       console.log(`\n🧪 Fresh agent (no AGENTS.md) attempts answers...`);
-      const results = await testFreshAgent(info, depthAnalysis, state, questions, opts.model, opts.baseUrl);
+      const results = await testFreshAgent(info, depthAnalysis, state, questions, opts.model, opts.baseUrl, opts.backend);
 
       const answered = results.filter((r) => r.answered);
       const failed = results.filter((r) => !r.answered);
