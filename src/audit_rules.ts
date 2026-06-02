@@ -36,16 +36,51 @@ export interface ExistingRule {
   questionId: string;        // generated id used to link probe → verdict
 }
 
-export type RuleVerdict = "essential" | "redundant" | "partial-coverage" | "uncertain";
+// Evidence-based output. Each rule emits named facts the reviewer can verify
+// without trusting a black-box verdict. The recommendation is deterministically
+// derived from these facts (see deriveRecommendation).
+
+export type SourceMode =
+  | "auto-loaded"        // AGENTS.md, CLAUDE.md, .cursor/rules — loaded by the tool every run
+  | "auto-activated"     // .claude/skills/*/SKILL.md — fires on matching file edits
+  | "auto-included"      // README.md, .github/copilot-instructions.md — commonly read first
+  | "manual-reference"   // .claude/runbooks/, .swm/, docs/ — agent must know to look
+  | "subagent"           // .claude/agents/*.md — agent definition file
+  | "source-code"        // .ts/.php/.py/etc — agent inferred from code
+  | "config"             // package.json, tsconfig, composer.json, etc.
+  | "unknown";
+
+export interface SourceCitation {
+  path: string;          // relative to repo root
+  mode: SourceMode;
+  modeNote: string;      // human-friendly mode explanation, e.g. "auto-activates on .php edits"
+}
+
+export type AgentBehavior =
+  | { kind: "matched-rule"; confidence: number }
+  | { kind: "partial-match"; confidence: number; missing: string }
+  | { kind: "failed-to-answer"; confidence: number; reason: string };
+
+export type Recommendation =
+  | "safe-to-drop"            // covered fully by auto-loaded/auto-activated source
+  | "keep-for-discoverability" // covered only by manual-reference sources
+  | "rephrase-with-nuance"    // has duplicates but rule adds something they miss
+  | "keep-essential"          // no doc covers it; agent couldn't infer
+  | "unsure";                 // agent answered but no clear source — manual review
 
 export interface AuditedRule {
   rule: ExistingRule;
-  verdict: RuleVerdict;
+  // The probe used to test the rule
   probeQuestion: string;
-  probeResult?: QuestionResult;
-  reason: string;
-  // For partial-coverage verdicts: what the agent's answer didn't capture.
-  missingFromAnswer?: string;
+  probeAnswer: string | null;
+  probeConfidence: number;
+  // Evidence — checkable facts
+  duplicatedIn: SourceCitation[];   // where the rule's content already exists; empty if none
+  addsBeyondDuplicates: string | null; // what the rule uniquely contributes; null if pure duplicate or no duplicates
+  agentBehaviorWithoutRule: AgentBehavior;
+  // Derived (deterministically from evidence above)
+  recommendation: Recommendation;
+  recommendationReason: string;
 }
 
 // ─── Parsing ───
@@ -268,6 +303,155 @@ async function judgeNuance(
   }
 }
 
+// ─── Source-mode classifier (path-based, deterministic) ───
+//
+// Given a file path, decide HOW an agent would normally encounter it during
+// real work. This is the key knob: a rule's info living in an "auto-loaded"
+// file means the agent sees it for free; living in "manual-reference" means
+// the agent only sees it if it knows to look — so the rule pointing at it
+// has independent discoverability value.
+
+export function classifySource(rawPath: string): SourceCitation {
+  // Normalize away the worktree prefix and leading slash
+  const norm = rawPath
+    .replace(/^.*?\/agent-tuner-worktree-[^/]+\//, "")
+    .replace(/^\/+/, "");
+
+  const last = norm.split("/").pop() || norm;
+
+  // AI-rules files at root (auto-loaded by their respective tools)
+  if (last === "AGENTS.md" || last === "CLAUDE.md") {
+    return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by Claude Code in non-bare mode" };
+  }
+  if (norm.startsWith(".cursor/")) {
+    return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by Cursor" };
+  }
+  if (norm.startsWith(".windsurfrules") || norm.startsWith(".clinerules")) {
+    return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by its respective tool" };
+  }
+
+  // Skills — auto-activate on trigger
+  if (/^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(norm)) {
+    const skillName = norm.split("/")[2];
+    return { path: norm, mode: "auto-activated", modeNote: `${skillName} skill auto-activates on its triggers` };
+  }
+  if (/^\.claude\/skills\/[^/]+\.(yaml|yml)$/.test(norm)) {
+    return { path: norm, mode: "auto-activated", modeNote: "skill manifest, fires on triggers" };
+  }
+
+  // Subagent definitions
+  if (norm.startsWith(".claude/agents/")) {
+    return { path: norm, mode: "subagent", modeNote: "subagent definition; invoked by Task tool" };
+  }
+
+  // Runbooks, Swimm, docs — manual references
+  if (norm.startsWith(".claude/runbooks/")) {
+    return { path: norm, mode: "manual-reference", modeNote: "runbook; agent must know to read it" };
+  }
+  if (norm.startsWith(".swm/")) {
+    return { path: norm, mode: "manual-reference", modeNote: "Swimm doc; agent must know to read it" };
+  }
+  if (norm.startsWith("docs/")) {
+    return { path: norm, mode: "manual-reference", modeNote: "in docs/; agent must know to read it" };
+  }
+
+  // README — usually one of the first reads
+  if (/(^|\/)README\.md$/i.test(norm)) {
+    return { path: norm, mode: "auto-included", modeNote: "README; typically read early" };
+  }
+
+  // Copilot
+  if (norm === ".github/copilot-instructions.md") {
+    return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by GitHub Copilot" };
+  }
+
+  // Source code
+  if (/\.(ts|tsx|js|jsx|mjs|cjs|php|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp)$/i.test(norm)) {
+    return { path: norm, mode: "source-code", modeNote: "source file; agent inferred from reading code" };
+  }
+
+  // Config
+  if (/^(package|tsconfig|composer|Cargo|pyproject|Gemfile|build\.gradle)/.test(last)) {
+    return { path: norm, mode: "config", modeNote: "config file" };
+  }
+  if (/\.(json|toml|yaml|yml|ini|env|xml|gradle|mk|sh)$/i.test(last)) {
+    return { path: norm, mode: "config", modeNote: "config / script file" };
+  }
+
+  return { path: norm, mode: "unknown", modeNote: "" };
+}
+
+// ─── Recommendation (derived from evidence) ───
+
+function deriveRecommendation(
+  duplicatedIn: SourceCitation[],
+  addsBeyondDuplicates: string | null,
+  behavior: AgentBehavior,
+): { recommendation: Recommendation; reason: string } {
+  // Agent couldn't answer → rule is essential.
+  if (behavior.kind === "failed-to-answer") {
+    return {
+      recommendation: "keep-essential",
+      reason: `fresh agent couldn't infer this without the rule (confidence ${behavior.confidence.toFixed(2)}; ${behavior.reason})`,
+    };
+  }
+
+  // Agent answered partially → nuance is missing.
+  if (behavior.kind === "partial-match") {
+    return {
+      recommendation: "rephrase-with-nuance",
+      reason: `agent partially answered but missed: ${behavior.missing}`,
+    };
+  }
+
+  // Agent matched the rule fully but nuance judge flagged something — keep with rephrase
+  if (addsBeyondDuplicates && addsBeyondDuplicates.trim().length > 0) {
+    return {
+      recommendation: "rephrase-with-nuance",
+      reason: `rule uniquely contributes: ${addsBeyondDuplicates}`,
+    };
+  }
+
+  // Agent matched and no nuance gap — check where it found the info.
+  if (duplicatedIn.length === 0) {
+    // No cited duplicates — answer probably came from code inference, training, or unattributed.
+    return {
+      recommendation: "unsure",
+      reason: "agent answered confidently but cited no specific source; could be training-data, code inference, or unattributed read",
+    };
+  }
+
+  const autoLoaded = duplicatedIn.filter((d) => d.mode === "auto-loaded" || d.mode === "auto-activated" || d.mode === "auto-included");
+  if (autoLoaded.length > 0) {
+    return {
+      recommendation: "safe-to-drop",
+      reason: `covered by ${autoLoaded.map((d) => `${d.path} (${d.modeNote})`).join("; ")} — agent gets this for free`,
+    };
+  }
+
+  const manual = duplicatedIn.filter((d) => d.mode === "manual-reference" || d.mode === "subagent");
+  if (manual.length > 0) {
+    return {
+      recommendation: "keep-for-discoverability",
+      reason: `info exists in ${manual.map((d) => d.path).join(", ")} but those aren't auto-loaded — rule serves as pointer/index`,
+    };
+  }
+
+  // Source or config only
+  const codeOrConfig = duplicatedIn.filter((d) => d.mode === "source-code" || d.mode === "config");
+  if (codeOrConfig.length > 0) {
+    return {
+      recommendation: "unsure",
+      reason: `agent inferred from ${codeOrConfig.slice(0, 3).map((d) => d.path).join(", ")} — keep if rule formalizes an implicit convention, drop if agent will always re-infer`,
+    };
+  }
+
+  return {
+    recommendation: "unsure",
+    reason: "no clear signal from evidence",
+  };
+}
+
 // ─── Audit ───
 
 export async function auditExistingRules(
@@ -299,84 +483,82 @@ export async function auditExistingRules(
   // Run the fresh agent on those questions (docs hidden by testFreshAgent)
   const results = await testFreshAgent(info, depthAnalysis, state, questions, model, baseUrl, backend);
 
-  // First pass: tentatively classify each rule based only on the agent's
-  // self-reported confidence + docsNeeded.
-  type PendingRule = {
+  // Match each rule to its probe result.
+  type Pending = {
     rule: ExistingRule;
-    result?: QuestionResult;
     probe: string;
-    tentative: RuleVerdict;
+    result?: QuestionResult;
   };
-  const pending: PendingRule[] = rules.map((rule, i) => {
-    const result = results.find((r) => r.questionId === rule.questionId);
-    const probe = probeQuestions[i];
-    if (!result) {
-      return { rule, probe, tentative: "uncertain" };
-    }
-    return {
-      rule,
-      result,
-      probe,
-      tentative: result.answered ? "redundant" : "essential",
-    };
-  });
+  const pending: Pending[] = rules.map((rule, i) => ({
+    rule,
+    probe: probeQuestions[i],
+    result: results.find((r) => r.questionId === rule.questionId),
+  }));
 
-  // Second pass: nuance-judge every would-be-redundant rule. Compare the
-  // rule's full content against the agent's actual answer; downgrade to
-  // partial-coverage when the answer misses anything meaningful.
-  //
-  // Batched in parallel — judging is ~1 API call per redundant rule, and
-  // running 30+ sequentially would dominate the wall-clock. Modest cap on
-  // concurrency to avoid hammering rate limits.
-  const wouldBeRedundant = pending.filter((p) => p.tentative === "redundant" && p.result?.answer);
-  if (wouldBeRedundant.length > 0) {
-    console.log(`🧐 Nuance-judging ${wouldBeRedundant.length} would-be-redundant rule(s)...`);
+  // Nuance-judge every rule the agent answered confidently. This is what
+  // populates `addsBeyondDuplicates` — the rule's unique nuance the
+  // agent's answer didn't capture (if any).
+  const answered = pending.filter((p) => p.result?.answered && p.result?.answer);
+  if (answered.length > 0) {
+    console.log(`🧐 Nuance-judging ${answered.length} answered rule(s) for content coverage...`);
   }
   const CONCURRENCY = 6;
   const nuanceVerdicts = new Map<string, { covered: boolean; missing?: string }>();
-  for (let i = 0; i < wouldBeRedundant.length; i += CONCURRENCY) {
-    const batch = wouldBeRedundant.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(
+  for (let i = 0; i < answered.length; i += CONCURRENCY) {
+    const batch = answered.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(
       batch.map((p) =>
         judgeNuance(p.rule.content, p.probe, p.result!.answer!, model, baseUrl)
-          .then((v) => ({ id: p.rule.questionId, v }))
+          .then((v) => ({ id: p.rule.questionId, v })),
       ),
     );
-    for (const { id, v } of results) nuanceVerdicts.set(id, v);
+    for (const { id, v } of batchResults) nuanceVerdicts.set(id, v);
   }
 
-  // Final pass: emit AuditedRule with adjusted verdict.
+  // Final pass: emit evidence-based AuditedRule per rule.
   const audited: AuditedRule[] = pending.map((p) => {
-    if (p.tentative === "uncertain") {
-      return { rule: p.rule, verdict: "uncertain", probeQuestion: p.probe, reason: "no probe result returned" };
-    }
-    if (p.tentative === "essential") {
-      return {
-        rule: p.rule,
-        verdict: "essential",
-        probeQuestion: p.probe,
-        probeResult: p.result,
-        reason: p.result!.failureReason || `fresh agent could not answer (confidence ${p.result!.confidence.toFixed(2)})`,
+    const probeAnswer = p.result?.answer || null;
+    const probeConfidence = p.result?.confidence ?? 0;
+
+    // Sources the agent self-reported as evidence — classify each.
+    const duplicatedIn: SourceCitation[] = (p.result?.evidence || []).map(classifySource);
+
+    // Behavior: did the agent match the rule, partially match, or fail?
+    let behavior: AgentBehavior;
+    if (!p.result) {
+      behavior = { kind: "failed-to-answer", confidence: 0, reason: "no probe result" };
+    } else if (!p.result.answered) {
+      behavior = {
+        kind: "failed-to-answer",
+        confidence: probeConfidence,
+        reason: p.result.failureReason || p.result.docsNeeded || "below confidence threshold or docs needed",
       };
+    } else {
+      const nuance = nuanceVerdicts.get(p.rule.questionId);
+      if (nuance && !nuance.covered && nuance.missing) {
+        behavior = { kind: "partial-match", confidence: probeConfidence, missing: nuance.missing };
+      } else {
+        behavior = { kind: "matched-rule", confidence: probeConfidence };
+      }
     }
-    // Tentative redundant — consult nuance judge.
-    const nuance = nuanceVerdicts.get(p.rule.questionId);
-    if (!nuance || nuance.covered) {
-      return {
-        rule: p.rule,
-        verdict: "redundant",
-        probeQuestion: p.probe,
-        probeResult: p.result,
-        reason: `fresh agent answered without the rule (confidence ${p.result!.confidence.toFixed(2)})`,
-      };
-    }
+
+    // What the rule uniquely adds — from nuance judge for matched cases,
+    // or the partial-match missing-content for partial cases.
+    let addsBeyondDuplicates: string | null = null;
+    if (behavior.kind === "partial-match") addsBeyondDuplicates = behavior.missing;
+
+    const { recommendation, reason } = deriveRecommendation(duplicatedIn, addsBeyondDuplicates, behavior);
+
     return {
       rule: p.rule,
-      verdict: "partial-coverage",
       probeQuestion: p.probe,
-      probeResult: p.result,
-      reason: `agent's answer didn't fully capture the rule's content`,
-      missingFromAnswer: nuance.missing,
+      probeAnswer,
+      probeConfidence,
+      duplicatedIn,
+      addsBeyondDuplicates,
+      agentBehaviorWithoutRule: behavior,
+      recommendation,
+      recommendationReason: reason,
     };
   });
 
@@ -385,51 +567,72 @@ export async function auditExistingRules(
 
 // ─── Reporting ───
 
+// Evidence-based output. For each rule prints the named facts, then the
+// derived recommendation. The reviewer can verify each fact by reading the
+// cited file path — no opaque verdict.
 export function summarizeAudit(audited: AuditedRule[]): string {
   if (audited.length === 0) return "";
 
-  const essential = audited.filter((a) => a.verdict === "essential");
-  const partial = audited.filter((a) => a.verdict === "partial-coverage");
-  const redundant = audited.filter((a) => a.verdict === "redundant");
-  const uncertain = audited.filter((a) => a.verdict === "uncertain");
+  // Group by recommendation
+  const byRec: Record<Recommendation, AuditedRule[]> = {
+    "keep-essential": [],
+    "rephrase-with-nuance": [],
+    "keep-for-discoverability": [],
+    "safe-to-drop": [],
+    "unsure": [],
+  };
+  for (const a of audited) byRec[a.recommendation].push(a);
 
   const lines: string[] = [];
   lines.push("");
-  lines.push("─".repeat(70));
-  lines.push(`  Existing-rule audit: ${essential.length} essential, ${partial.length} partial-coverage, ${redundant.length} likely redundant, ${uncertain.length} uncertain`);
-  lines.push("─".repeat(70));
+  lines.push("─".repeat(78));
+  lines.push(`  Existing-rule audit (${audited.length} rules):`);
+  lines.push(`    keep-essential:           ${byRec["keep-essential"].length}`);
+  lines.push(`    rephrase-with-nuance:     ${byRec["rephrase-with-nuance"].length}`);
+  lines.push(`    keep-for-discoverability: ${byRec["keep-for-discoverability"].length}`);
+  lines.push(`    safe-to-drop:             ${byRec["safe-to-drop"].length}`);
+  lines.push(`    unsure (review manually): ${byRec["unsure"].length}`);
+  lines.push("─".repeat(78));
 
-  if (essential.length > 0) {
-    lines.push("");
-    lines.push("✅ Essential (keep — fresh agent failed without them):");
-    for (const a of essential) {
-      lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
-    }
-  }
+  const sectionHeaders: Array<[Recommendation, string]> = [
+    ["keep-essential", "✅ KEEP — Essential (fresh agent couldn't infer without the rule)"],
+    ["rephrase-with-nuance", "⚠️  REPHRASE — Has duplicates but rule uniquely contributes nuance"],
+    ["keep-for-discoverability", "📌 KEEP — For discoverability (info only in manual-reference docs)"],
+    ["safe-to-drop", "🔻 DROP — Fully covered by auto-loaded/auto-activated source"],
+    ["unsure", "❓ MANUAL REVIEW — Evidence inconclusive"],
+  ];
 
-  if (partial.length > 0) {
+  for (const [rec, header] of sectionHeaders) {
+    const rules = byRec[rec];
+    if (rules.length === 0) continue;
     lines.push("");
-    lines.push("⚠️  Partial coverage (keep or rephrase — agent answered the gist but missed nuance):");
-    for (const a of partial) {
-      lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
-      if (a.missingFromAnswer) lines.push(`      → missing: ${a.missingFromAnswer}`);
-    }
-  }
-
-  if (redundant.length > 0) {
-    lines.push("");
-    lines.push("🔶 Likely redundant (review — fresh agent answered fully without them):");
-    for (const a of redundant) {
-      lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
-      lines.push(`      → ${a.reason}`);
-    }
-  }
-
-  if (uncertain.length > 0) {
-    lines.push("");
-    lines.push("❓ Uncertain (probe didn't complete cleanly):");
-    for (const a of uncertain) {
-      lines.push(`   [${a.rule.section}:L${a.rule.lineNumber}] ${a.rule.content.slice(0, 100)}${a.rule.content.length > 100 ? "…" : ""}`);
+    lines.push(header);
+    for (const a of rules) {
+      lines.push("");
+      lines.push(`  [${a.rule.section}:L${a.rule.lineNumber}] "${a.rule.content.slice(0, 120)}${a.rule.content.length > 120 ? "…" : ""}"`);
+      // Print evidence: cited duplicates with mode notes
+      if (a.duplicatedIn.length > 0) {
+        lines.push(`    DUPLICATED IN:`);
+        for (const d of a.duplicatedIn) {
+          lines.push(`      - ${d.path}  (${d.modeNote || d.mode})`);
+        }
+      } else {
+        lines.push(`    DUPLICATED IN:           (no cited source)`);
+      }
+      // What the rule adds
+      const adds = a.addsBeyondDuplicates;
+      lines.push(`    ADDS BEYOND DUPLICATES:  ${adds ? adds : "nothing the agent's answer missed"}`);
+      // Agent behavior
+      const b = a.agentBehaviorWithoutRule;
+      if (b.kind === "matched-rule") {
+        lines.push(`    AGENT BEHAVIOR W/O RULE: matched the rule (confidence ${b.confidence.toFixed(2)})`);
+      } else if (b.kind === "partial-match") {
+        lines.push(`    AGENT BEHAVIOR W/O RULE: partial match (confidence ${b.confidence.toFixed(2)}); missing: ${b.missing}`);
+      } else {
+        lines.push(`    AGENT BEHAVIOR W/O RULE: failed to answer (confidence ${b.confidence.toFixed(2)}); ${b.reason}`);
+      }
+      lines.push(`    RECOMMENDATION:          ${a.recommendation}`);
+      lines.push(`    REASON:                  ${a.recommendationReason}`);
     }
   }
 
@@ -443,16 +646,21 @@ export function writeAuditReport(repoPath: string, audited: AuditedRule[]): stri
     repoPath,
     timestamp: new Date().toISOString(),
     rules: audited.map((a) => ({
+      // Rule identity
       section: a.rule.section,
       lineNumber: a.rule.lineNumber,
       content: a.rule.content,
-      verdict: a.verdict,
-      reason: a.reason,
-      missingFromAnswer: a.missingFromAnswer,
+      // Probe & test
       probeQuestion: a.probeQuestion,
-      probeAnswer: a.probeResult?.answer,
-      probeConfidence: a.probeResult?.confidence,
-      probeDocsNeeded: a.probeResult?.docsNeeded,
+      probeAnswer: a.probeAnswer,
+      probeConfidence: a.probeConfidence,
+      // Evidence
+      duplicatedIn: a.duplicatedIn,
+      addsBeyondDuplicates: a.addsBeyondDuplicates,
+      agentBehaviorWithoutRule: a.agentBehaviorWithoutRule,
+      // Derived recommendation
+      recommendation: a.recommendation,
+      recommendationReason: a.recommendationReason,
     })),
   }, null, 2));
   return reportPath;
