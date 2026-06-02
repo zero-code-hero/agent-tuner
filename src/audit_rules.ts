@@ -41,13 +41,24 @@ export interface ExistingRule {
 // derived from these facts (see deriveRecommendation).
 
 export type SourceMode =
-  | "auto-loaded"        // AGENTS.md, CLAUDE.md, .cursor/rules — loaded by the tool every run
-  | "auto-activated"     // .claude/skills/*/SKILL.md — fires on matching file edits
-  | "auto-included"      // README.md, .github/copilot-instructions.md — commonly read first
-  | "manual-reference"   // .claude/runbooks/, .swm/, docs/ — agent must know to look
-  | "subagent"           // .claude/agents/*.md — agent definition file
-  | "source-code"        // .ts/.php/.py/etc — agent inferred from code
-  | "config"             // package.json, tsconfig, composer.json, etc.
+  // Truly unconditional: file content is in the model's context EVERY turn,
+  // for every task. Rule duplicates here are genuinely free.
+  | "auto-loaded"
+  // Skill description (frontmatter) is in context every turn, but the body
+  // only loads when Claude's analysis matches the description — not guaranteed
+  // for every task that touches the skill's domain. Per Claude Code docs.
+  | "conditional-load"
+  // README and similar commonly-read-early files. Not unconditional, but
+  // typically present before the agent does real work.
+  | "auto-included"
+  // Agent has to know to look. Runbooks, Swimm guides, docs/.
+  | "manual-reference"
+  // Subagent definition file (.claude/agents/*.md) — agent loads when invoked.
+  | "subagent"
+  // Agent inferred from source code.
+  | "source-code"
+  // Config file (package.json, tsconfig, etc.)
+  | "config"
   | "unknown";
 
 export interface SourceCitation {
@@ -330,16 +341,16 @@ export function classifySource(rawPath: string): SourceCitation {
     return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by its respective tool" };
   }
 
-  // Skills — frontmatter (name+description) is in context every session;
-  // body auto-loads when Claude's analysis matches the description, or when
-  // the user runs /skill-name. So the rule's content is "free" when the
-  // skill applies, even without an explicit trigger directive.
+  // Skills — only the frontmatter description is unconditionally in context.
+  // The SKILL.md body loads conditionally when the model's analysis matches
+  // the description, so a rule's content living in the body is NOT reliably
+  // available — only when this turn's task happens to match the description.
   if (/^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(norm)) {
     const skillName = norm.split("/")[2];
-    return { path: norm, mode: "auto-activated", modeNote: `${skillName} skill: description always in context, body auto-loads on description-match` };
+    return { path: norm, mode: "conditional-load", modeNote: `${skillName} skill: description always in context, body loads only when description matches the task` };
   }
   if (/^\.claude\/skills\/[^/]+\.(yaml|yml)$/.test(norm)) {
-    return { path: norm, mode: "auto-activated", modeNote: "skill manifest: description always in context" };
+    return { path: norm, mode: "conditional-load", modeNote: "skill manifest: description always in context, body conditional" };
   }
 
   // Subagent definitions
@@ -424,19 +435,30 @@ function deriveRecommendation(
     };
   }
 
-  const autoLoaded = duplicatedIn.filter((d) => d.mode === "auto-loaded" || d.mode === "auto-activated" || d.mode === "auto-included");
-  if (autoLoaded.length > 0) {
+  // Only TRULY unconditional sources count as drop-safe. AGENTS.md, CLAUDE.md,
+  // .cursor/rules — files whose content is in the model's context every turn,
+  // for every task.
+  const trulyAutoLoaded = duplicatedIn.filter((d) => d.mode === "auto-loaded");
+  if (trulyAutoLoaded.length > 0) {
     return {
       recommendation: "safe-to-drop",
-      reason: `covered by ${autoLoaded.map((d) => `${d.path} (${d.modeNote})`).join("; ")} — agent gets this for free`,
+      reason: `covered by ${trulyAutoLoaded.map((d) => `${d.path} (${d.modeNote})`).join("; ")} — agent gets this unconditionally`,
     };
   }
 
-  const manual = duplicatedIn.filter((d) => d.mode === "manual-reference" || d.mode === "subagent");
-  if (manual.length > 0) {
+  // Conditional-load (SKILL bodies) and manual-reference (runbooks/swim/docs)
+  // both require something to fire before the rule's content reaches the
+  // agent: a description match for skills, or an explicit read for runbooks.
+  // Neither is reliable enough to drop the AGENTS.md rule; both qualify as
+  // keep-for-discoverability.
+  const conditionalOrManual = duplicatedIn.filter(
+    (d) => d.mode === "conditional-load" || d.mode === "manual-reference" || d.mode === "subagent" || d.mode === "auto-included",
+  );
+  if (conditionalOrManual.length > 0) {
+    const notes = conditionalOrManual.map((d) => `${d.path} (${d.modeNote || d.mode})`);
     return {
       recommendation: "keep-for-discoverability",
-      reason: `info exists in ${manual.map((d) => d.path).join(", ")} but those aren't auto-loaded — rule serves as pointer/index`,
+      reason: `info exists in ${notes.join("; ")} — those aren't unconditionally loaded, so the rule still provides reliable coverage`,
     };
   }
 
