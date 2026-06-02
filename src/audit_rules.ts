@@ -330,13 +330,16 @@ export function classifySource(rawPath: string): SourceCitation {
     return { path: norm, mode: "auto-loaded", modeNote: "auto-loaded by its respective tool" };
   }
 
-  // Skills — auto-activate on trigger
+  // Skills — frontmatter (name+description) is in context every session;
+  // body auto-loads when Claude's analysis matches the description, or when
+  // the user runs /skill-name. So the rule's content is "free" when the
+  // skill applies, even without an explicit trigger directive.
   if (/^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(norm)) {
     const skillName = norm.split("/")[2];
-    return { path: norm, mode: "auto-activated", modeNote: `${skillName} skill auto-activates on its triggers` };
+    return { path: norm, mode: "auto-activated", modeNote: `${skillName} skill: description always in context, body auto-loads on description-match` };
   }
   if (/^\.claude\/skills\/[^/]+\.(yaml|yml)$/.test(norm)) {
-    return { path: norm, mode: "auto-activated", modeNote: "skill manifest, fires on triggers" };
+    return { path: norm, mode: "auto-activated", modeNote: "skill manifest: description always in context" };
   }
 
   // Subagent definitions
